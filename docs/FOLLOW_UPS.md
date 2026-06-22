@@ -39,8 +39,6 @@ correctness and small API cleanup batches.
 
 ## Rendering Contract
 
-- Add a shader example showing linear RGBA8 upload, UV clamping, and
-  `atlas_t::px_range` reconstruction.
 - Add a visual/golden test for the atlas range and coordinate contract. The
   downstream terminal-surface tests exercise this path today, but a local
   renderer-independent fixture would make regressions easier to isolate.
@@ -50,8 +48,6 @@ correctness and small API cleanup batches.
 ## Build And Packaging
 
 - Consider respecting `BUILD_SHARED_LIBS` instead of forcing a static library.
-- Reduce `CACHE ... FORCE` dependency settings where possible so parent
-  projects retain more control.
 - Prefer release archives with hashes over Git fetches if reproducibility or
   locked-down build environments become a requirement.
 - Revisit install/export behavior if the library is packaged independently.

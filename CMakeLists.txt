@@ -48,7 +48,7 @@ function(vnm_msdf_text_set_fetchcontent_build_dir name dir_name)
 
   set(FETCHCONTENT_BINARY_DIR_${name}
     "${FETCHCONTENT_BASE_DIR}/${dir_name}-build${_fc_config_suffix}"
-    CACHE PATH "" FORCE)
+    CACHE PATH "")
 endfunction()
 
 function(vnm_msdf_text_alias_freetype_target)
@@ -118,12 +118,12 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
     BINARY_DIR "${FETCHCONTENT_BINARY_DIR_freetype}"
   )
 
-  set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
-  set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
-  set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
-  set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
-  set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
-  set(FT_ENABLE_ERROR_STRINGS OFF CACHE BOOL "" FORCE)
+  set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "")
+  set(FT_DISABLE_BROTLI ON CACHE BOOL "")
+  set(FT_DISABLE_BZIP2 ON CACHE BOOL "")
+  set(FT_DISABLE_PNG ON CACHE BOOL "")
+  set(FT_DISABLE_ZLIB ON CACHE BOOL "")
+  set(FT_ENABLE_ERROR_STRINGS OFF CACHE BOOL "")
 
   FetchContent_MakeAvailable(freetype)
   vnm_msdf_text_alias_freetype_target()
@@ -167,14 +167,15 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
     GIT_SHALLOW TRUE
     BINARY_DIR "${FETCHCONTENT_BINARY_DIR_msdfgen}"
   )
-  set(MSDFGEN_USE_VCPKG OFF CACHE BOOL "" FORCE)
-  set(MSDFGEN_BUILD_STANDALONE OFF CACHE BOOL "" FORCE)
-  set(MSDFGEN_DISABLE_SVG ON CACHE BOOL "" FORCE)
-  set(MSDFGEN_DISABLE_PNG ON CACHE BOOL "" FORCE)
-  set(MSDFGEN_USE_SKIA OFF CACHE BOOL "" FORCE)
+  set(MSDFGEN_USE_VCPKG OFF CACHE BOOL "")
+  set(MSDFGEN_BUILD_STANDALONE OFF CACHE BOOL "")
+  set(MSDFGEN_DISABLE_SVG ON CACHE BOOL "")
+  set(MSDFGEN_DISABLE_PNG ON CACHE BOOL "")
+  set(MSDFGEN_USE_SKIA OFF CACHE BOOL "")
+  set(MSDFGEN_CORE_ONLY OFF)
   set(MSDFGEN_CORE_ONLY OFF CACHE BOOL "" FORCE)
   if(MSVC)
-    set(MSDFGEN_DYNAMIC_RUNTIME ON CACHE BOOL "" FORCE)
+    set(MSDFGEN_DYNAMIC_RUNTIME ON CACHE BOOL "")
   endif()
   FetchContent_MakeAvailable(msdfgen)
   vnm_msdf_text_alias_msdfgen_targets()
@@ -193,6 +194,8 @@ else()
     "set FETCHCONTENT_SOURCE_DIR_MSDFGEN or VNM_MSDF_TEXT_DEP_OVERRIDES_FILE.")
 endif()
 
+# Intentionally static: the public API exposes STL types and is meant for
+# source-level embedding, not as a stable shared-library ABI.
 add_library(vnm_msdf_text STATIC
   src/msdf_text.cpp
   include/vnm_msdf_text/msdf_text.h

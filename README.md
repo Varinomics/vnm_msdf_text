@@ -106,6 +106,39 @@ scaling and `sharpness_bias`. `options_t::atlas_gutter_px` controls empty pixels
 between packed glyph bitmaps. Shaders should still clamp sampling to the glyph UV
 rectangle when using linear filtering.
 
+A minimal OpenGL-style renderer setup looks like:
+
+```cpp
+// Linear RGBA8 upload; do not use an sRGB internal format for distance data.
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, atlas.atlas_size, atlas.atlas_size,
+             0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.rgba.data());
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+const float shader_px_range =
+    vnm::msdf_text::px_range_for_pixel_height(atlas, draw_pixel_height);
+
+set_uniform("u_px_range", shader_px_range);
+// atlas.atlas_px_range is the baked atlas-space range; shader_px_range is the
+// draw-size output-pixel range used for coverage reconstruction below.
+```
+
+```glsl
+// Inputs from text_vertex_t: v_uv = (s, t).
+// v_uv_bounds = (s_min, t_min, s_max, t_max).
+float median3(vec3 v) {
+    return max(min(v.r, v.g), min(max(v.r, v.g), v.b));
+}
+
+vec2 uv = clamp(v_uv, v_uv_bounds.xy, v_uv_bounds.zw);
+vec4 mtsdf = texture(u_atlas, uv);
+float signed_distance = median3(mtsdf.rgb) - 0.5;
+float coverage = clamp(signed_distance * u_px_range + 0.5, 0.0, 1.0);
+out_color = vec4(text_color.rgb, text_color.a * coverage);
+```
+
 Text layout is single-line, left-to-right codepoint layout with optional
 kerning. It does not perform HarfBuzz shaping, bidirectional reordering,
 ligature substitution, grapheme-cluster handling, or combining-mark placement.
