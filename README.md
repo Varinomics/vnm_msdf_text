@@ -15,6 +15,21 @@ It uses FreeType and msdfgen. When configured as the top-level project, CMake
 fetches those dependencies when compatible targets are not already available.
 Parent projects should set `VNM_MSDF_TEXT_FETCH_DEPS` explicitly.
 
+The package also exports dependency-light LCD/MSDF support targets:
+
+```cmake
+vnm_msdf_text::lcd_contract
+vnm_msdf_text::lcd_shader_reference
+```
+
+Use `find_package(vnm_msdf_text CONFIG COMPONENTS lcd_contract)` or
+`lcd_shader_reference` when a consumer only needs the resolved LCD enum, mapping
+helpers, or shader drift-reference constants. Request `COMPONENTS atlas` for the
+full atlas-builder target and its FreeType/msdfgen dependencies. A no-component
+package lookup succeeds with the dependency-light LCD targets when the installed
+package does not export the atlas target. See
+`docs/lcd_msdf_commonization_contract.md` for the LCD contract.
+
 ## Licensing
 
 The source code is licensed under the BSD 2-Clause License. The bundled

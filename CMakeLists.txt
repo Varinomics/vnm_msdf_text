@@ -31,6 +31,41 @@ option(VNM_MSDF_TEXT_BUILD_TESTS
 
 include(FetchContent)
 
+add_library(vnm_msdf_text_lcd_contract INTERFACE)
+add_library(vnm_msdf_text::lcd_contract ALIAS vnm_msdf_text_lcd_contract)
+
+set_target_properties(vnm_msdf_text_lcd_contract PROPERTIES
+  EXPORT_NAME lcd_contract
+)
+
+target_include_directories(vnm_msdf_text_lcd_contract
+  INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_compile_features(vnm_msdf_text_lcd_contract INTERFACE cxx_std_17)
+
+add_library(vnm_msdf_text_lcd_shader_reference INTERFACE)
+add_library(vnm_msdf_text::lcd_shader_reference ALIAS vnm_msdf_text_lcd_shader_reference)
+
+set_target_properties(vnm_msdf_text_lcd_shader_reference PROPERTIES
+  EXPORT_NAME lcd_shader_reference
+)
+
+target_include_directories(vnm_msdf_text_lcd_shader_reference
+  INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_compile_features(vnm_msdf_text_lcd_shader_reference INTERFACE cxx_std_17)
+
+target_link_libraries(vnm_msdf_text_lcd_shader_reference
+  INTERFACE
+    vnm_msdf_text_lcd_contract
+)
+
 if(DEFINED VNM_MSDF_TEXT_USE_SYSTEM_LIBS)
   message(STATUS
     "VNM_MSDF_TEXT_USE_SYSTEM_LIBS is deprecated. Use "
@@ -213,6 +248,7 @@ target_compile_features(vnm_msdf_text PUBLIC cxx_std_20)
 
 target_link_libraries(vnm_msdf_text
   PUBLIC
+    vnm_msdf_text_lcd_contract
     msdfgen::msdfgen-ext
     Freetype::Freetype
     msdfgen::msdfgen-core
@@ -228,13 +264,31 @@ else()
   target_compile_options(vnm_msdf_text PRIVATE -Wall -Wextra)
 endif()
 
+# install(EXPORT) requires every PUBLIC link dependency to be either IMPORTED
+# or part of the installed export set. Locally-built dependencies from
+# FetchContent or a parent project do not satisfy that here, so only the
+# dependency-light components are exported in that configuration.
+set(_vnm_msdf_text_export_ok TRUE)
+foreach(_dep IN ITEMS Freetype::Freetype msdfgen::msdfgen-core msdfgen::msdfgen-ext)
+  if(TARGET ${_dep})
+    get_target_property(_dep_imported ${_dep} IMPORTED)
+    if(NOT _dep_imported)
+      set(_vnm_msdf_text_export_ok FALSE)
+    endif()
+  endif()
+endforeach()
+set(VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT ${_vnm_msdf_text_export_ok})
+
 if(VNM_MSDF_TEXT_BUILD_TESTS)
   enable_testing()
 
   add_executable(vnm_msdf_text_tests
     tests/msdf_text_tests.cpp
   )
-  target_link_libraries(vnm_msdf_text_tests PRIVATE vnm_msdf_text)
+  target_link_libraries(vnm_msdf_text_tests
+    PRIVATE
+      vnm_msdf_text
+  )
   target_compile_features(vnm_msdf_text_tests PRIVATE cxx_std_20)
   target_compile_definitions(vnm_msdf_text_tests PRIVATE
     VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
@@ -247,34 +301,68 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
   endif()
 
   add_test(NAME vnm_msdf_text_tests COMMAND vnm_msdf_text_tests)
+
+  add_executable(vnm_msdf_text_lcd_contract_tests
+    tests/lcd_contract_tests.cpp
+  )
+  target_link_libraries(vnm_msdf_text_lcd_contract_tests
+    PRIVATE
+      vnm_msdf_text_lcd_shader_reference
+  )
+  target_compile_features(vnm_msdf_text_lcd_contract_tests PRIVATE cxx_std_17)
+
+  if(MSVC)
+    target_compile_options(vnm_msdf_text_lcd_contract_tests PRIVATE /W4)
+  else()
+    target_compile_options(vnm_msdf_text_lcd_contract_tests PRIVATE -Wall -Wextra)
+  endif()
+
+  add_test(
+    NAME vnm_msdf_text_lcd_contract_tests
+    COMMAND vnm_msdf_text_lcd_contract_tests)
+
+  if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
+    add_test(
+      NAME vnm_msdf_text_package_smoke
+      COMMAND ${CMAKE_COMMAND}
+        "-DVNM_MSDF_TEXT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DVNM_MSDF_TEXT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+        "-DVNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT=${VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT}"
+        "-DVNM_MSDF_TEXT_TEST_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+        "-DVNM_MSDF_TEXT_TEST_CONFIG=$<CONFIG>"
+        "-DVNM_MSDF_TEXT_TEST_GENERATOR=${CMAKE_GENERATOR}"
+        "-DVNM_MSDF_TEXT_TEST_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+        "-DVNM_MSDF_TEXT_TEST_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+        "-DVNM_MSDF_TEXT_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_smoke.cmake")
+  endif()
 endif()
 
 if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
   include(GNUInstallDirs)
   include(CMakePackageConfigHelpers)
 
-  # install(EXPORT) requires every PUBLIC link dependency to be either
-  # IMPORTED or part of an installed export set. Locally-built dependencies
-  # from FetchContent or a parent project do not satisfy that here, so we
-  # install headers and the library archive but skip the export.
-  set(_vnm_msdf_text_export_ok TRUE)
-  foreach(_dep IN ITEMS Freetype::Freetype msdfgen::msdfgen-core msdfgen::msdfgen-ext)
-    if(TARGET ${_dep})
-      get_target_property(_dep_imported ${_dep} IMPORTED)
-      if(NOT _dep_imported)
-        set(_vnm_msdf_text_export_ok FALSE)
-      endif()
-    endif()
-  endforeach()
-
   install(DIRECTORY include/vnm_msdf_text
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   )
-  install(FILES LICENSE.txt THIRD_PARTY_NOTICES.md
+  install(FILES
+    LICENSE.txt
+    README.md
+    THIRD_PARTY_NOTICES.md
+    docs/lcd_msdf_commonization_contract.md
     DESTINATION ${CMAKE_INSTALL_DOCDIR}
   )
 
+  install(TARGETS
+    vnm_msdf_text_lcd_contract
+    vnm_msdf_text_lcd_shader_reference
+    EXPORT vnm_msdf_textTargets
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+
   if(_vnm_msdf_text_export_ok)
+    set(VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT TRUE)
+
     install(TARGETS vnm_msdf_text
       EXPORT vnm_msdf_textTargets
       LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -283,38 +371,37 @@ if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
       INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
 
-    install(EXPORT vnm_msdf_textTargets
-      NAMESPACE vnm_msdf_text::
-      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text
-    )
-
-    write_basic_package_version_file(
-      "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config-version.cmake"
-      VERSION ${PROJECT_VERSION}
-      COMPATIBILITY SameMajorVersion
-    )
-
-    configure_package_config_file(
-      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vnm_msdf_text-config.cmake.in"
-      "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config.cmake"
-      INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text
-    )
-
-    install(FILES
-      "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config.cmake"
-      "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config-version.cmake"
-      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text
-    )
   else()
-    install(TARGETS vnm_msdf_text
-      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
+    set(VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT FALSE)
+
     message(STATUS
       "vnm_msdf_text: Skipping find_package export because Freetype/msdfgen are "
       "built locally. Configure with -DVNM_MSDF_TEXT_FETCH_DEPS=OFF and "
       "provide find_package-able dependencies to install a find_package-ready "
-      "vnm_msdf_text package.")
+      "vnm_msdf_text atlas component. Dependency-light lcd_contract and "
+      "lcd_shader_reference package components will still be exported.")
   endif()
+
+  install(EXPORT vnm_msdf_textTargets
+    NAMESPACE vnm_msdf_text::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text
+  )
+
+  write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+  )
+
+  configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vnm_msdf_text-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text
+  )
+
+  install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text-config-version.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text
+  )
 endif()

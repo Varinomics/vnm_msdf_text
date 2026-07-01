@@ -2,9 +2,95 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(Freetype)
-find_dependency(msdfgen)
+set(_vnm_msdf_text_requested_components ${vnm_msdf_text_FIND_COMPONENTS})
+set(_vnm_msdf_text_has_atlas_export @VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT@)
+set(_vnm_msdf_text_atlas_deps_found FALSE)
+set(_vnm_msdf_text_atlas_deps_required FALSE)
+set(_vnm_msdf_text_explicit_atlas FALSE)
+set(_vnm_msdf_text_wants_atlas FALSE)
+
+if(_vnm_msdf_text_requested_components)
+  foreach(_vnm_msdf_text_component IN LISTS _vnm_msdf_text_requested_components)
+    if(_vnm_msdf_text_component STREQUAL "atlas")
+      set(_vnm_msdf_text_explicit_atlas TRUE)
+      set(_vnm_msdf_text_wants_atlas TRUE)
+      if(vnm_msdf_text_FIND_REQUIRED_atlas)
+        set(_vnm_msdf_text_atlas_deps_required TRUE)
+      endif()
+    elseif(_vnm_msdf_text_component STREQUAL "lcd_contract")
+    elseif(_vnm_msdf_text_component STREQUAL "lcd_shader_reference")
+    else()
+      set(vnm_msdf_text_${_vnm_msdf_text_component}_FOUND FALSE)
+      if(vnm_msdf_text_FIND_REQUIRED_${_vnm_msdf_text_component})
+        set(vnm_msdf_text_NOT_FOUND_MESSAGE
+          "Unsupported vnm_msdf_text component: ${_vnm_msdf_text_component}")
+      endif()
+    endif()
+  endforeach()
+elseif(_vnm_msdf_text_has_atlas_export)
+  set(_vnm_msdf_text_wants_atlas TRUE)
+  set(_vnm_msdf_text_atlas_deps_required TRUE)
+endif()
+
+if(_vnm_msdf_text_wants_atlas AND _vnm_msdf_text_has_atlas_export)
+  if(_vnm_msdf_text_atlas_deps_required)
+    find_dependency(Freetype)
+    find_dependency(msdfgen)
+  else()
+    find_package(Freetype QUIET)
+    find_package(msdfgen QUIET)
+  endif()
+
+  if(TARGET Freetype::Freetype AND
+     TARGET msdfgen::msdfgen-core AND
+     TARGET msdfgen::msdfgen-ext)
+    set(_vnm_msdf_text_atlas_deps_found TRUE)
+  elseif(_vnm_msdf_text_atlas_deps_required)
+    set(vnm_msdf_text_FOUND FALSE)
+    if(NOT vnm_msdf_text_NOT_FOUND_MESSAGE)
+      string(CONCAT vnm_msdf_text_NOT_FOUND_MESSAGE
+        "The vnm_msdf_text atlas component requires find_package-able FreeType "
+        "and msdfgen targets.")
+    endif()
+  endif()
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/vnm_msdf_textTargets.cmake")
 
+set(vnm_msdf_text_lcd_contract_FOUND FALSE)
+if(TARGET vnm_msdf_text::lcd_contract)
+  set(vnm_msdf_text_lcd_contract_FOUND TRUE)
+endif()
+
+set(vnm_msdf_text_lcd_shader_reference_FOUND FALSE)
+if(TARGET vnm_msdf_text::lcd_shader_reference)
+  set(vnm_msdf_text_lcd_shader_reference_FOUND TRUE)
+endif()
+
+set(vnm_msdf_text_atlas_FOUND FALSE)
+if(_vnm_msdf_text_has_atlas_export AND
+   _vnm_msdf_text_atlas_deps_found AND
+   TARGET vnm_msdf_text::vnm_msdf_text)
+  set(vnm_msdf_text_atlas_FOUND TRUE)
+endif()
+
+if(_vnm_msdf_text_explicit_atlas AND
+   vnm_msdf_text_FIND_REQUIRED_atlas AND
+   NOT vnm_msdf_text_atlas_FOUND)
+  set(vnm_msdf_text_FOUND FALSE)
+  if(NOT vnm_msdf_text_NOT_FOUND_MESSAGE)
+    string(CONCAT vnm_msdf_text_NOT_FOUND_MESSAGE
+      "The installed vnm_msdf_text package does not export the atlas component. "
+      "Install from a build configured with find_package-able FreeType and msdfgen dependencies.")
+  endif()
+endif()
+
 check_required_components(vnm_msdf_text)
+
+unset(_vnm_msdf_text_atlas_deps_found)
+unset(_vnm_msdf_text_atlas_deps_required)
+unset(_vnm_msdf_text_component)
+unset(_vnm_msdf_text_explicit_atlas)
+unset(_vnm_msdf_text_has_atlas_export)
+unset(_vnm_msdf_text_requested_components)
+unset(_vnm_msdf_text_wants_atlas)

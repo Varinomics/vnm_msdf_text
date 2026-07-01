@@ -31,3 +31,45 @@ jobs:
       - name: Run tests
         working-directory: build
         run: ctest -C Release --output-on-failure
+
+  full-export:
+    name: Windows full export
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{ runner.temp }}\vcpkg
+      VCPKG_TARGET_TRIPLET: x64-windows
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Install full-export dependencies
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: >
+          & "$env:VCPKG_ROOT\vcpkg.exe" install
+          "freetype:$env:VCPKG_TARGET_TRIPLET"
+          "msdfgen[extensions]:$env:VCPKG_TARGET_TRIPLET"
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build-full-export
+          -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET"
+          -DVNM_MSDF_TEXT_BUILD_TESTS=ON
+          -DVNM_MSDF_TEXT_FETCH_DEPS=OFF
+
+      - name: Build
+        run: cmake --build build-full-export --config Release --parallel
+
+      - name: Run tests
+        working-directory: build-full-export
+        run: ctest -C Release --output-on-failure
