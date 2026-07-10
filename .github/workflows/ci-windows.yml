@@ -47,8 +47,19 @@ jobs:
         run: |
           $env:VCPKG_ROOT = "$env:RUNNER_TEMP\vcpkg"
           "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $env:VCPKG_DEFAULT_BINARY_CACHE = "$env:RUNNER_TEMP\vcpkg-archives"
+          New-Item -ItemType Directory -Force -Path "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          "VCPKG_DEFAULT_BINARY_CACHE=$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-File -FilePath $env:GITHUB_ENV -Append
           git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Cache vcpkg binary artifacts
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-archives
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TARGET_TRIPLET }}-freetype-msdfgen-ext-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_TARGET_TRIPLET }}-freetype-msdfgen-ext-
 
       - name: Install full-export dependencies
         shell: pwsh
