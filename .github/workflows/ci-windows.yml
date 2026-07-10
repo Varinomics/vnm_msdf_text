@@ -36,7 +36,6 @@ jobs:
     name: Windows full export
     runs-on: windows-latest
     env:
-      VCPKG_ROOT: ${{ runner.temp }}\vcpkg
       VCPKG_TARGET_TRIPLET: x64-windows
 
     steps:
@@ -46,6 +45,8 @@ jobs:
         shell: pwsh
         working-directory: ${{ runner.temp }}
         run: |
+          $env:VCPKG_ROOT = "$env:RUNNER_TEMP\vcpkg"
+          "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
           git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
 
