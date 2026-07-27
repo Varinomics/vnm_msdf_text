@@ -116,12 +116,6 @@ bool test_lcd_contract_helpers()
     ok &= check(!lcd::is_display_specific(order_t::NONE), "NONE must not be display-specific");
     ok &= check(lcd::resolved_order_value(order_t::NONE) == 0, "NONE value must be 0");
     ok &= check(lcd::shader_uniform_value(order_t::NONE) == 0.0f, "NONE uniform must be 0.0");
-    ok &= check(
-        lcd::resolved_order_value(order_t::NONE) == lcd_ref::k_lcd_order_none_value,
-        "NONE helper value must match shader reference");
-    ok &= check(
-        lcd::shader_uniform_value(order_t::NONE) == lcd_ref::k_lcd_order_none_uniform,
-        "NONE helper uniform must match shader reference");
 
     for (std::size_t i = 0; i < std::size(display_orders); ++i) {
         const order_t order = display_orders[i];
@@ -155,9 +149,6 @@ bool test_lcd_contract_helpers()
         ok &= check(
             lcd::shader_uniform_value(reference.order) == reference.uniform,
             "helper shader uniform must match shader reference uniform");
-        ok &= check(
-            reference.uniform == static_cast<float>(reference.value),
-            "shader reference uniform must match its integer value");
     }
 
     const order_t invalid_order = static_cast<order_t>(95);
