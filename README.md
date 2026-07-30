@@ -29,7 +29,7 @@ full atlas-builder target and its FreeType/msdfgen dependencies. A no-component
 package lookup succeeds with the dependency-light LCD targets when the installed
 package does not export the atlas target. See
 `docs/lcd_msdf_commonization_contract.md` for the LCD contract.
-Before 1.0, package compatibility is limited to the same minor version.
+Versioned package lookup requires the exact current project version.
 
 ## Licensing
 
