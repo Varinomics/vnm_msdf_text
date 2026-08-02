@@ -4,6 +4,7 @@ foreach(_required_var IN ITEMS
   VNM_MSDF_TEXT_SOURCE_DIR
   VNM_MSDF_TEXT_BINARY_DIR
   VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT
+  VNM_MSDF_TEXT_PROJECT_VERSION
   VNM_MSDF_TEXT_CTEST_COMMAND)
   if(NOT DEFINED ${_required_var} OR "${${_required_var}}" STREQUAL "")
     message(FATAL_ERROR "tests/package_smoke.cmake requires ${_required_var}.")
@@ -83,6 +84,11 @@ function(vnm_msdf_text_consumer_configure_command out_var consumer_source_dir co
   if(DEFINED VNM_MSDF_TEXT_TEST_GENERATOR AND
      NOT VNM_MSDF_TEXT_TEST_GENERATOR STREQUAL "")
     list(APPEND _command -G "${VNM_MSDF_TEXT_TEST_GENERATOR}")
+  endif()
+  if(DEFINED VNM_MSDF_TEXT_TEST_MAKE_PROGRAM AND
+     NOT VNM_MSDF_TEXT_TEST_MAKE_PROGRAM STREQUAL "")
+    list(APPEND _command
+      "-DCMAKE_MAKE_PROGRAM=${VNM_MSDF_TEXT_TEST_MAKE_PROGRAM}")
   endif()
   if(DEFINED VNM_MSDF_TEXT_TEST_GENERATOR_PLATFORM AND
      NOT VNM_MSDF_TEXT_TEST_GENERATOR_PLATFORM STREQUAL "")
@@ -199,6 +205,56 @@ endfunction()
 set(_deps_disabled_args
   -DCMAKE_DISABLE_FIND_PACKAGE_Freetype=TRUE
   -DCMAKE_DISABLE_FIND_PACKAGE_msdfgen=TRUE)
+
+if(NOT VNM_MSDF_TEXT_PROJECT_VERSION MATCHES
+   "^([0-9]+)\\.([0-9]+)\\.[0-9]+$")
+  message(FATAL_ERROR
+    "Package smoke requires a major.minor.patch project version.")
+endif()
+set(_non_current_version_request
+  "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+
+set(_version_resolution_cmake [=[
+cmake_minimum_required(VERSION 3.16)
+project(version_resolution LANGUAGES NONE)
+
+if(NOT DEFINED VNM_MSDF_TEXT_PACKAGE_PREFIX OR
+   VNM_MSDF_TEXT_PACKAGE_PREFIX STREQUAL "")
+  message(FATAL_ERROR "version resolution smoke requires the installed package prefix")
+endif()
+if(NOT DEFINED VNM_MSDF_TEXT_CURRENT_VERSION OR
+   VNM_MSDF_TEXT_CURRENT_VERSION STREQUAL "" OR
+   NOT DEFINED VNM_MSDF_TEXT_NON_CURRENT_VERSION OR
+   VNM_MSDF_TEXT_NON_CURRENT_VERSION STREQUAL "")
+  message(FATAL_ERROR "version resolution smoke requires current and non-current versions")
+endif()
+
+find_package(vnm_msdf_text ${VNM_MSDF_TEXT_NON_CURRENT_VERSION}
+  CONFIG QUIET COMPONENTS lcd_contract
+  PATHS "${VNM_MSDF_TEXT_PACKAGE_PREFIX}"
+  NO_DEFAULT_PATH)
+if(vnm_msdf_text_FOUND)
+  message(FATAL_ERROR
+    "vnm_msdf_text must reject a non-current version request")
+endif()
+if(TARGET vnm_msdf_text::lcd_contract)
+  message(FATAL_ERROR
+    "rejected non-current version request must not import targets")
+endif()
+
+find_package(vnm_msdf_text ${VNM_MSDF_TEXT_CURRENT_VERSION} EXACT
+  CONFIG REQUIRED COMPONENTS lcd_contract
+  PATHS "${VNM_MSDF_TEXT_PACKAGE_PREFIX}"
+  NO_DEFAULT_PATH)
+if(NOT vnm_msdf_text_lcd_contract_FOUND)
+  message(FATAL_ERROR
+    "vnm_msdf_text must accept the exact current version")
+endif()
+if(NOT TARGET vnm_msdf_text::lcd_contract)
+  message(FATAL_ERROR
+    "accepted exact-current request must import lcd_contract")
+endif()
+]=])
 
 set(_no_component_cmake [=[
 cmake_minimum_required(VERSION 3.16)
@@ -495,6 +551,31 @@ file(WRITE "${CMAKE_BINARY_DIR}/lcd_only_precheck_passed.txt" "ok\n")
 find_package(vnm_msdf_text CONFIG REQUIRED COMPONENTS atlas)
 message(FATAL_ERROR "required atlas unexpectedly configured")
 ]=])
+
+set(_version_resolution_source_dir "${_work_dir}/version_resolution")
+set(_version_resolution_build_dir "${_work_dir}/version_resolution-build")
+file(MAKE_DIRECTORY "${_version_resolution_source_dir}")
+file(WRITE
+  "${_version_resolution_source_dir}/CMakeLists.txt"
+  "${_version_resolution_cmake}")
+vnm_msdf_text_consumer_configure_command(
+  _version_resolution_command
+  "${_version_resolution_source_dir}"
+  "${_version_resolution_build_dir}"
+  EXTRA_ARGS
+    "-DVNM_MSDF_TEXT_PACKAGE_PREFIX=${_install_prefix}"
+    "-DVNM_MSDF_TEXT_CURRENT_VERSION=${VNM_MSDF_TEXT_PROJECT_VERSION}"
+    "-DVNM_MSDF_TEXT_NON_CURRENT_VERSION=${_non_current_version_request}")
+execute_process(
+  COMMAND ${_version_resolution_command}
+  RESULT_VARIABLE _version_resolution_result
+  OUTPUT_VARIABLE _version_resolution_output
+  ERROR_VARIABLE  _version_resolution_error)
+if(NOT _version_resolution_result EQUAL 0)
+  message(FATAL_ERROR
+    "Configuring package version resolution smoke failed.\n"
+    "${_version_resolution_output}\n${_version_resolution_error}")
+endif()
 
 vnm_msdf_text_run_success_consumer(
   component_success
