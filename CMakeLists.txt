@@ -238,6 +238,10 @@ add_library(vnm_msdf_text STATIC
 
 add_library(vnm_msdf_text::vnm_msdf_text ALIAS vnm_msdf_text)
 
+set_target_properties(vnm_msdf_text PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+
 target_include_directories(vnm_msdf_text
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
