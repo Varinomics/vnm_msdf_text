@@ -418,7 +418,7 @@ build_result_t build_font_atlas(
     int draw_pixel_height,
     std::span<const char32_t> codepoints,
     const options_t& options,
-    const log_callback_t& log_debug)
+    const log_callback_t& log_debug_info)
 {
     if (!font_data || font_size == 0) {
         return failure("No font data supplied");
@@ -704,8 +704,8 @@ build_result_t build_font_atlas(
             for (std::size_t j = i; j < visible_jobs.size(); ++j) {
                 append_codepoints(result.skipped_no_space, visible_jobs[j].codepoints);
             }
-            if (log_debug) {
-                log_debug("MSDF atlas out of space, skipping remaining glyphs");
+            if (log_debug_info) {
+                log_debug_info("MSDF atlas out of space, skipping remaining glyphs");
             }
             break;
         }

@@ -290,7 +290,7 @@ build_result_t build_font_atlas(
     int draw_pixel_height,
     std::span<const char32_t> codepoints,
     const options_t& options = options_t(),
-    const log_callback_t& log_debug = log_callback_t());
+    const log_callback_t& log_debug_info = log_callback_t());
 
 /**
  * @brief Shader distance range in output pixels for a draw pixel height.
