@@ -77,10 +77,18 @@ public:
      * @brief Distinguishes snapshot instances that share an identity.
      *
      * Two snapshots built from the same inputs describe the same font, but they
-     * are still separate objects with separate atlas storage. A renderer keys
-     * its GPU atlas upload on the revision so a rebuilt snapshot is uploaded
-     * again, while CPU measurement caches can key on the identity alone.
-     * Revisions are unique and increasing within a process.
+     * are still separate objects with separate atlas storage. A caller that
+     * derives state from one snapshot keys that cache on the revision so a
+     * rebuilt snapshot invalidates it, while CPU measurement caches can key on
+     * the identity alone.
+     *
+     * Revisions are unique and increasing among the snapshots built by one
+     * loaded copy of this component. This is a static library, so two modules
+     * that each link it count independently: a revision orders and compares
+     * snapshots from one producer and never identifies a snapshot across a
+     * module boundary. Compare content with identity(), and decide whether a
+     * resource built from a snapshot can be reused from the retained snapshot
+     * object itself.
      */
     [[nodiscard]] std::uint64_t revision() const { return m_revision; }
 

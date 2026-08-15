@@ -1,43 +1,82 @@
 #include <vnm_msdf_text/rhi/font_snapshot.h>
 
-#include "rhi/sha256.h"
+#include <QtCore/QByteArrayView>
+#include <QtCore/QCryptographicHash>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
 namespace vnm::msdf_text::rhi {
 namespace {
 
+/// Feeds one scalar in a fixed big-endian width, so the digest never depends on
+/// the host's byte order or on where one field ends and the next begins.
+void hash_u32(QCryptographicHash& hash, std::uint32_t value)
+{
+    const char bytes[4] = {
+        static_cast<char>((value >> 24) & 0xFFu),
+        static_cast<char>((value >> 16) & 0xFFu),
+        static_cast<char>((value >>  8) & 0xFFu),
+        static_cast<char>( value        & 0xFFu),
+    };
+    hash.addData(QByteArrayView(bytes, sizeof(bytes)));
+}
+
+void hash_f32(QCryptographicHash& hash, float value)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    hash_u32(hash, bits);
+}
+
+void hash_f64(QCryptographicHash& hash, double value)
+{
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    hash_u32(hash, static_cast<std::uint32_t>(bits >> 32));
+    hash_u32(hash, static_cast<std::uint32_t>(bits & 0xFFFFFFFFu));
+}
+
 // A snapshot identity must change whenever anything that changes the baked
-// atlas changes, so every build input feeds the digest, not just the bytes.
+// atlas changes, so every build input feeds the digest, not just the bytes. The
+// order and framing below are the serialized identity contract: the same inputs
+// must always produce the same byte stream, and no field may be dropped,
+// reordered, or written at a different width.
 font_identity_t digest_build_inputs(
     std::span<const std::uint8_t> font_bytes,
     int                           draw_pixel_height,
     std::span<const char32_t>     codepoints,
     const options_t&              options)
 {
-    detail::Sha256 hash;
+    QCryptographicHash hash(QCryptographicHash::Sha256);
 
-    hash.update(font_bytes);
-    hash.update_u32(static_cast<std::uint32_t>(font_bytes.size()));
-    hash.update_u32(static_cast<std::uint32_t>(draw_pixel_height));
+    hash.addData(QByteArrayView(
+        reinterpret_cast<const char*>(font_bytes.data()),
+        static_cast<qsizetype>(font_bytes.size())));
+    hash_u32(hash, static_cast<std::uint32_t>(font_bytes.size()));
+    hash_u32(hash, static_cast<std::uint32_t>(draw_pixel_height));
 
-    hash.update_u32(static_cast<std::uint32_t>(options.atlas_size));
-    hash.update_f64(options.min_atlas_font_size);
-    hash.update_f32(options.atlas_px_range);
-    hash.update_f32(options.sharpness_bias);
-    hash.update_u32(static_cast<std::uint32_t>(options.atlas_gutter_px));
-    hash.update_u32(options.build_kerning_table ? 1u : 0u);
-    hash.update_u32(static_cast<std::uint32_t>(options.missing_glyph_policy));
+    hash_u32(hash, static_cast<std::uint32_t>(options.atlas_size));
+    hash_f64(hash, options.min_atlas_font_size);
+    hash_f32(hash, options.atlas_px_range);
+    hash_f32(hash, options.sharpness_bias);
+    hash_u32(hash, static_cast<std::uint32_t>(options.atlas_gutter_px));
+    hash_u32(hash, options.build_kerning_table ? 1u : 0u);
+    hash_u32(hash, static_cast<std::uint32_t>(options.missing_glyph_policy));
 
-    hash.update_u32(static_cast<std::uint32_t>(codepoints.size()));
+    hash_u32(hash, static_cast<std::uint32_t>(codepoints.size()));
     for (char32_t codepoint : codepoints) {
-        hash.update_u32(static_cast<std::uint32_t>(codepoint));
+        hash_u32(hash, static_cast<std::uint32_t>(codepoint));
     }
 
+    // SHA-256 is defined to produce exactly k_font_digest_bytes bytes.
+    const QByteArray digest = hash.result();
+
     font_identity_t identity;
-    identity.digest = hash.finish();
+    std::memcpy(identity.digest.data(), digest.constData(), identity.digest.size());
     return identity;
 }
 

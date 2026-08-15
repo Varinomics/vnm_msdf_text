@@ -190,8 +190,14 @@ editor-style consumer neither finds nor links Qt through this project. A
 consumer that requires GPU text can read the `VNM_MSDF_TEXT_HAS_RHI` cache
 entry and fail its own configure instead of linking a build without it. The
 component requires C++20, Qt 6.7 or newer, and Qt Shader Tools at build time
-only. It is a source-tree target consumed through `add_subdirectory` or
-`FetchContent`; it is not part of the installed package export.
+only.
+
+It is a source-tree target, consumed through `add_subdirectory` or
+`FetchContent` and linked as `vnm_msdf_text::rhi`. It is not part of the
+installed package: the installed tree contains neither an RHI target nor the
+`vnm_msdf_text/rhi/` headers, and `find_package(vnm_msdf_text COMPONENTS rhi)`
+is rejected as an unsupported component. Installing headers a package cannot
+satisfy would be a contract the package does not have.
 
 Public headers live under `vnm_msdf_text/rhi/` and everything is in namespace
 `vnm::msdf_text::rhi`. The public headers only forward-declare the QRhi types
@@ -221,8 +227,16 @@ bounds, positioned glyphs, and quad emission are the existing free functions in
 bytes, the draw pixel height, the atlas options, and the requested codepoints.
 Two snapshots with equal identity measure identically and emit identical quads,
 so a consumer can key cached CPU measurements or a presentation key on it and
-keep them across a rebuild. `revision()` distinguishes snapshot instances that
-share an identity; a renderer keys its GPU atlas upload on the revision.
+keep them across a rebuild.
+
+`revision()` distinguishes snapshot instances that share an identity, so a
+consumer can tell that state it derived from a snapshot came from an older one.
+Revisions are unique and increasing among the snapshots built by one loaded copy
+of this static library; two modules that each link it count independently, so a
+revision compares snapshots from one producer and does not identify a snapshot
+across a module boundary. Compare content with `identity()`, and decide whether
+a device resource built from a snapshot can be reused from the retained snapshot
+object, which is what `Text_renderer` does.
 
 ### Batches and draw states
 
@@ -241,6 +255,19 @@ optional scissor rectangle. `pixel_ortho_transform(frame)` builds the transform
 for text laid out in top-left-origin framebuffer pixels, including the backend's
 clip-space correction.
 
+`clip_rect_t` is in framebuffer pixels with `x`, `y` at the bottom-left corner.
+QRhi takes OpenGL-style scissor coordinates on every backend and itself flips
+them for the backends whose native origin is the top-left, so a caller uses one
+convention everywhere - and it is the opposite of the Y-down pixel space the
+text itself is laid out in. The real-backend gate pins that origin rather than
+asserting it: it clips the lower and the upper half of a target the text crosses
+and checks which half survives. Negative `x` or `y` and partially out-of-bounds
+rectangles are clamped by QRhi, and a zero width or height clips the draw away.
+A negative width or height is not a rectangle QRhi can express -
+it drops such a scissor and leaves the previous one in force - so `queue()`
+rejects an enabled clip with one instead of recording a draw under someone
+else's clip.
+
 ### Frames
 
 `Text_renderer` belongs to one renderer, one window, and one QRhi device, and
@@ -257,19 +284,41 @@ A frame is:
    and one index buffer, so the draw count follows the number of draw states,
    not the number of glyphs.
 3. `prepare(frame)` before the host opens its render pass, because the atlas,
-   geometry, and uniform uploads go through the frame's resource-update batch.
-4. `record(frame)` inside the pass.
+   geometry, and uniform uploads go into the frame's resource-update batch.
+4. `record(frame)` inside the pass the host opened with that batch.
 
 Every step returns a `text_result_t`. `record()` reports `NOT_PREPARED` when
 text was queued but preparation did not run or did not succeed, so a frame can
 never present as text-complete when its text was dropped; `diagnostics()`
-reports what the call actually issued. The renderer sets a scissor for every
-draw and leaves the viewport as the host set it.
+reports what the call actually issued. A `queue()` that fails - a rejected clip,
+a batch from another font, a geometry limit, or `OUT_OF_MEMORY` - leaves the
+frame exactly as it was rather than half-queued. The renderer sets a scissor for
+every draw and leaves the viewport as the host set it.
+
+The frame's first batch with geometry fixes the snapshot the whole frame uses.
+Every later batch must be laid out against that same snapshot, and the atlas
+`prepare()` offers and the smoothing data `record()` draws with come from it, so
+a frame can never combine one snapshot's geometry with another's atlas. A
+`set_font()` during a frame that already holds text therefore applies to the
+next frame that queues its first batch, not to the one in flight.
 
 The resource set is rebuilt when the QRhi changes, the pipeline when the
 render-pass descriptor or sample count changes, and the atlas is uploaded again
-when the snapshot revision changes, even if the queued text did not change.
+when the renderer draws a different snapshot, even if the queued text did not
+change. Growing the vertex and index buffers rebuilds neither the shader
+bindings nor the pipeline, because neither buffer is named by the binding set.
 `diagnostics()` exposes those causes as counters.
+
+`prepare()` enqueues its uploads; it does not perform them. QRhi runs the
+commands in a `QRhiResourceUpdateBatch` only when the host submits the batch
+through `beginPass()`, `endPass()`, or `QRhiCommandBuffer::resourceUpdate()`,
+and a host may release or abandon a batch instead, in which case nothing runs.
+So an enqueued atlas upload stays outstanding until a frame carrying it reaches
+`record()`, which the host runs inside the pass it opened with that batch; a
+frame cancelled, abandoned, or failed before then leaves the upload outstanding
+and the next `prepare()` enqueues it again. `atlas_upload_enqueues` counts those
+offers, not executed uploads. Nothing in this component observes GPU execution,
+presentation, or display, and it never claims to.
 
 ### Shaders
 
@@ -311,7 +360,7 @@ ctest --test-dir build --output-on-failure
 
 Set `-DVNM_MSDF_TEXT_BUILD_TESTS=OFF` to skip the test executable.
 
-A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` adds two more tests.
+A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` registers further tests.
 `vnm_msdf_text_rhi_tests` covers the snapshot, batch, and frame contracts and
 drives the Null QRhi backend, which proves resource lifecycle and command
 recording. `vnm_msdf_text_rhi_real_backend_tests` renders text with a real
@@ -319,3 +368,45 @@ backend and inspects the rasterized result; it needs a working graphics device
 and is never a substitute for the Null suite. Pass `--backend`, `--image`, and
 `--window` to select the backend, save the rendered image, and additionally
 record frames against a shown window.
+
+`tests/source_consumer` gates the way the component is actually consumed: it is
+a project of its own that adds this repository with `add_subdirectory`, checks
+`VNM_MSDF_TEXT_HAS_RHI`, includes only public headers, and links only
+`vnm_msdf_text::rhi`. Configure, build, and run it like any other consumer:
+
+```sh
+cmake -S tests/source_consumer -B build-source-consumer -DVNM_MSDF_TEXT_FETCH_DEPS=ON
+cmake --build build-source-consumer
+./build-source-consumer/vnm_msdf_text_rhi_source_consumer
+```
+
+It is not registered with CTest. Configuring it detects a compiler and building
+it invokes one, and a build a test run starts is a build nothing scheduled.
+
+The `vnm_msdf_text_package_smoke` test installs the package and inspects it:
+component and exact-version resolution, dependency-light degradation, and the
+headers and targets the installed tree must not carry. It configures its
+consumers as `LANGUAGES NONE` projects, so it detects no compiler and builds
+nothing. `tests/package_consumer` covers the other half - that the installed
+headers and imported targets really compile, link, and run - and is a project
+of its own for the same reason `tests/source_consumer` is. Point it at the
+prefix the smoke test installed and at the version this project declares, once
+as the package stands and once as a dependency-light consumer sees it:
+
+```sh
+ctest --test-dir build -R vnm_msdf_text_package_smoke --output-on-failure
+
+cmake -S tests/package_consumer -B build-package-consumer \
+    -DVNM_MSDF_TEXT_PACKAGE_PREFIX=$PWD/build/package_smoke/install \
+    -DVNM_MSDF_TEXT_PACKAGE_VERSION=0.2.0
+cmake --build build-package-consumer
+ctest --test-dir build-package-consumer --output-on-failure
+
+cmake -S tests/package_consumer -B build-package-consumer-nodeps \
+    -DVNM_MSDF_TEXT_PACKAGE_PREFIX=$PWD/build/package_smoke/install \
+    -DVNM_MSDF_TEXT_PACKAGE_VERSION=0.2.0 \
+    -DCMAKE_DISABLE_FIND_PACKAGE_Freetype=TRUE \
+    -DCMAKE_DISABLE_FIND_PACKAGE_msdfgen=TRUE
+cmake --build build-package-consumer-nodeps
+ctest --test-dir build-package-consumer-nodeps --output-on-failure
+```

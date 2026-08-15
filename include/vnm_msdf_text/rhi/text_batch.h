@@ -36,8 +36,10 @@ public:
      * supplied at queue time maps that space to the render target.
      *
      * Fails with INVALID_ARGUMENT when the batch already holds geometry from a
-     * different font, and with GEOMETRY_LIMIT_EXCEEDED when the run would push
-     * the batch past the addressable index range.
+     * different font, with GEOMETRY_LIMIT_EXCEEDED when the run would push the
+     * batch past the addressable index range, and with OUT_OF_MEMORY when the
+     * geometry could not be allocated. A failed append leaves the batch exactly
+     * as it was, including its font identity.
      */
     [[nodiscard]] text_result_t append_run(
         const Font_snapshot& font,
@@ -51,7 +53,10 @@ public:
      * Indices are relative to the supplied vertices and are rebased onto the
      * batch. Fails with INVALID_ARGUMENT when the batch already holds geometry
      * from a different font, when the indices do not form whole triangles, or
-     * when an index addresses a vertex that was not supplied.
+     * when an index addresses a vertex that was not supplied; with
+     * GEOMETRY_LIMIT_EXCEEDED past the addressable index range; and with
+     * OUT_OF_MEMORY when the geometry could not be allocated. A failed append
+     * leaves the batch exactly as it was, including its font identity.
      */
     [[nodiscard]] text_result_t append_quads(
         const Font_snapshot&           font,
@@ -72,7 +77,8 @@ public:
     [[nodiscard]] std::span<const std::uint32_t> indices()  const { return m_indices; }
 
 private:
-    [[nodiscard]] text_result_t adopt_font(const Font_snapshot& font);
+    /// Rejects a font that would mix with the geometry the batch already holds.
+    [[nodiscard]] text_result_t validate_font(const Font_snapshot& font) const;
 
     std::vector<text_vertex_t>     m_vertices;
     std::vector<std::uint32_t>     m_indices;

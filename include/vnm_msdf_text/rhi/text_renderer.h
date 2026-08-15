@@ -25,6 +25,12 @@ namespace vnm::msdf_text::rhi {
  * The render target must be the one the pass is opened on: its render-pass
  * descriptor, sample count, and pixel size decide the pipeline and the
  * unclipped scissor.
+ *
+ * The host must submit resource_updates for this frame, by passing it to
+ * QRhiCommandBuffer::beginPass(), endPass(), or resourceUpdate(). QRhi runs the
+ * commands in a batch only when the batch is submitted; a batch that is
+ * released or abandoned instead executes nothing, which is why prepare() below
+ * treats an upload as enqueued rather than done.
  */
 struct frame_t
 {
@@ -34,7 +40,19 @@ struct frame_t
     QRhiResourceUpdateBatch* resource_updates = nullptr;
 };
 
-/// Scissor rectangle in framebuffer pixels, in the QRhi bottom-left convention.
+/**
+ * @brief Scissor rectangle in framebuffer pixels.
+ *
+ * x and y are the bottom-left corner. QRhi takes OpenGL-style scissor
+ * coordinates on every backend and itself flips them for the backends whose
+ * native origin is the top-left, so a caller uses one convention everywhere -
+ * and it is the opposite of the top-left pixel space the text is laid out in.
+ * Negative x or y and partially out-of-bounds rectangles are clamped, and a
+ * zero width or height clips the draw away entirely. A negative width or height
+ * is not a rectangle QRhi can express: it drops such a scissor and leaves the
+ * previous one in force, so queue() rejects it instead of recording a draw
+ * under someone else's clip.
+ */
 struct clip_rect_t
 {
     bool enabled = false;
@@ -86,11 +104,18 @@ struct draw_state_t
 struct renderer_diagnostics_t
 {
     /// Increments whenever the whole device-local resource set is dropped.
-    std::uint64_t resource_generation = 0;
+    std::uint64_t resource_generation   = 0;
     /// Increments whenever the graphics pipeline is created.
-    std::uint64_t pipeline_builds     = 0;
-    /// Increments whenever the atlas texture is uploaded.
-    std::uint64_t atlas_uploads       = 0;
+    std::uint64_t pipeline_builds       = 0;
+    /**
+     * @brief Increments whenever an atlas upload is put into a frame's batch.
+     *
+     * An enqueued upload is not an executed one, and this renderer never sees
+     * the submission that would execute it. The count therefore says how often
+     * the atlas was offered to a frame, which rises again whenever a frame that
+     * carried an upload did not reach record().
+     */
+    std::uint64_t atlas_upload_enqueues = 0;
 
     std::size_t   vertex_buffer_bytes  = 0;
     std::size_t   index_buffer_bytes   = 0;
@@ -135,9 +160,17 @@ public:
     /**
      * @brief Set or replace the snapshot this renderer draws with.
      *
-     * A snapshot with a new revision is uploaded on the next prepare(); the
-     * previous atlas texture is released then, not while a frame may still be
-     * recording from it.
+     * A replacement takes effect for frames that queue their first text after
+     * this call. A frame that has already queued text keeps drawing the
+     * snapshot that text was queued against, so replacing the font can never
+     * move queued vertices, UVs, or smoothing data onto a different atlas; a
+     * batch laid out against the replacement is rejected until the next
+     * begin_frame().
+     *
+     * A different snapshot is uploaded by the next prepare() that draws it. The
+     * renderer keeps a reference to the snapshot whose bytes the atlas texture
+     * holds until it uploads another one, so the bytes an enqueued upload
+     * refers to stay alive whether or not the host submits that frame.
      */
     void set_font(std::shared_ptr<const Font_snapshot> font);
     [[nodiscard]] const std::shared_ptr<const Font_snapshot>& font() const;
@@ -152,10 +185,19 @@ public:
      * draw count follows the number of queued draw states, not the number of
      * glyphs. An empty batch is accepted and queues nothing.
      *
+     * The frame's first batch with geometry fixes the font snapshot for the
+     * whole frame. Every later batch must be laid out against that same
+     * snapshot, and the atlas prepare() uploads and the smoothing data record()
+     * draws with are that snapshot's, so a frame can never combine one
+     * snapshot's geometry with another's atlas.
+     *
      * Fails with NO_FONT when the batch has geometry and no snapshot is set,
      * with INVALID_ARGUMENT when the batch was laid out against a different
-     * font, and with GEOMETRY_LIMIT_EXCEEDED when the frame's accumulated
-     * geometry would exceed one QRhi buffer or the index range.
+     * font than the frame's or the draw state enables a clip rectangle with a
+     * negative width or height, with GEOMETRY_LIMIT_EXCEEDED when the frame's
+     * accumulated geometry would exceed one QRhi buffer or the index range, and
+     * with OUT_OF_MEMORY when the frame's geometry could not be allocated. A
+     * failed queue leaves the frame exactly as it was.
      */
     [[nodiscard]] text_result_t queue(const Text_batch& batch, const draw_state_t& state);
 
@@ -163,9 +205,16 @@ public:
      * @brief Create or update the device-local resources and enqueue uploads.
      *
      * Must run before the host opens its render pass, because the atlas,
-     * geometry, and uniform uploads all go through the frame's resource-update
-     * batch. A frame with nothing queued still uploads a changed atlas, so a
+     * geometry, and uniform uploads all go into the frame's resource-update
+     * batch. A frame with nothing queued still enqueues a changed atlas, so a
      * later frame that does queue text records against current data.
+     *
+     * Enqueueing is not uploading. QRhi executes a resource-update batch only
+     * when the host submits it, and the host may release or abandon it instead,
+     * so this call never concludes that the atlas reached the device. An
+     * enqueued atlas upload stays outstanding until a frame carrying it reaches
+     * record(); a frame that is cancelled, abandoned, or fails before then
+     * leaves it outstanding and the next prepare() enqueues it again.
      */
     [[nodiscard]] text_result_t prepare(const frame_t& frame);
 
@@ -176,6 +225,13 @@ public:
      * did not succeed, so a frame can never present as text-complete when its
      * text was dropped. The queued state is cleared either way; the recorded
      * draw count in diagnostics() describes what this call actually issued.
+     *
+     * Reaching this call with a usable frame is the one point in the sequence
+     * at which the renderer knows the host got past submitting the batch
+     * prepare() filled: the host opens the pass this call records into with
+     * that batch. An outstanding atlas upload is settled here and not before.
+     * That is a statement about submission only; nothing in this API observes
+     * GPU execution, presentation, or display.
      *
      * The pipeline declares scissor use, so every draw sets a scissor: the
      * draw state's clip rectangle, or the render target's full pixel size. The

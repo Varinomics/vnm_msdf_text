@@ -12,7 +12,7 @@ constexpr std::size_t k_max_vertices =
 
 } // namespace
 
-text_result_t Text_batch::adopt_font(const Font_snapshot& font)
+text_result_t Text_batch::validate_font(const Font_snapshot& font) const
 {
     if (m_font_identity && *m_font_identity != font.identity()) {
         return detail::make_text_result(
@@ -20,7 +20,6 @@ text_result_t Text_batch::adopt_font(const Font_snapshot& font)
             "a text batch holds geometry from one font only");
     }
 
-    m_font_identity = font.identity();
     return {};
 }
 
@@ -30,14 +29,18 @@ text_result_t Text_batch::append_run(
     float                baseline_x,
     float                baseline_y)
 {
-    const text_result_t adopted = adopt_font(font);
-    if (adopted.status != Text_status::OK) {
-        return adopted;
+    const text_result_t accepted = validate_font(font);
+    if (accepted.status != Text_status::OK) {
+        return accepted;
     }
 
     const std::size_t vertex_mark = m_vertices.size();
     const std::size_t index_mark  = m_indices.size();
 
+    // append_text_quads() grows both vectors as it goes, so a failure part-way
+    // through is rolled back to the marks above before it is reported. Shrinking
+    // back cannot throw, and the font identity is only adopted once the whole
+    // run is in, so a failed append leaves the batch exactly as it was.
     try {
         append_text_quads(
             font.atlas(),
@@ -59,10 +62,11 @@ text_result_t Text_batch::append_run(
         m_vertices.resize(vertex_mark);
         m_indices.resize(index_mark);
         return detail::make_text_result(
-            Text_status::GEOMETRY_LIMIT_EXCEEDED,
+            Text_status::OUT_OF_MEMORY,
             "text run geometry could not be allocated");
     }
 
+    m_font_identity = font.identity();
     return {};
 }
 
@@ -92,18 +96,30 @@ text_result_t Text_batch::append_quads(
         }
     }
 
-    const text_result_t adopted = adopt_font(font);
-    if (adopted.status != Text_status::OK) {
-        return adopted;
+    const text_result_t accepted = validate_font(font);
+    if (accepted.status != Text_status::OK) {
+        return accepted;
+    }
+
+    // Both vectors are reserved before either is appended to, so a failed
+    // allocation cannot leave the batch holding vertices without their indices.
+    try {
+        m_vertices.reserve(m_vertices.size() + vertices.size());
+        m_indices.reserve(m_indices.size() + indices.size());
+    }
+    catch (const std::bad_alloc&) {
+        return detail::make_text_result(
+            Text_status::OUT_OF_MEMORY,
+            "text quad geometry could not be allocated");
     }
 
     const auto base = static_cast<std::uint32_t>(m_vertices.size());
     m_vertices.insert(m_vertices.end(), vertices.begin(), vertices.end());
-    m_indices.reserve(m_indices.size() + indices.size());
     for (std::uint32_t index : indices) {
         m_indices.push_back(index + base);
     }
 
+    m_font_identity = font.identity();
     return {};
 }
 

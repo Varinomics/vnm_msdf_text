@@ -41,6 +41,14 @@ enum class Text_status
     GPU_RESOURCE_FAILED,
     /// The queued geometry exceeds what one QRhi buffer or index range can address.
     GEOMETRY_LIMIT_EXCEEDED,
+    /**
+     * @brief Host memory for the call's own containers could not be obtained.
+     *
+     * Distinct from GEOMETRY_LIMIT_EXCEEDED, which names geometry the contract
+     * cannot express at all. A call that reports this one changed nothing: the
+     * batch or the queued frame is exactly what it was before the call.
+     */
+    OUT_OF_MEMORY,
 };
 
 /// Stable spelling of a status for logs and test failure messages.
@@ -56,6 +64,7 @@ enum class Text_status
         case Text_status::SHADER_UNAVAILABLE:      return "shader_unavailable";
         case Text_status::GPU_RESOURCE_FAILED:     return "gpu_resource_failed";
         case Text_status::GEOMETRY_LIMIT_EXCEEDED: return "geometry_limit_exceeded";
+        case Text_status::OUT_OF_MEMORY:           return "out_of_memory";
         default:                                   return "unknown";
     }
 }

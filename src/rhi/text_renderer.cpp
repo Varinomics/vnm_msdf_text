@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <new>
 #include <utility>
 #include <vector>
 
@@ -104,10 +106,23 @@ struct Text_renderer::Impl
 {
     std::shared_ptr<const Font_snapshot> font;
 
-    // Held from one upload to the next so the atlas bytes referenced by an
-    // enqueued texture upload stay alive even if the caller replaces the font
-    // before the host submits the frame's resource-update batch.
-    std::shared_ptr<const Font_snapshot> uploaded_font;
+    // Captured from font on the frame's first batch with geometry. Everything
+    // the frame does - the identity every later batch is checked against, the
+    // atlas that is uploaded, the smoothing range in the uniform block - reads
+    // this, so replacing font mid-frame cannot change work already queued.
+    std::shared_ptr<const Font_snapshot> frame_font;
+
+    // The snapshot whose bytes the atlas texture holds. Reuse is keyed on this
+    // retained object rather than on a counter: the renderer owns a reference
+    // to it, so no other live snapshot can share its address, and a snapshot is
+    // immutable once built.
+    std::shared_ptr<const Font_snapshot> committed_atlas;
+
+    // The snapshot of an upload that has been put into a host batch but whose
+    // submission this renderer has not seen yet. Retaining it keeps the bytes
+    // that upload refers to alive for as long as the host may still submit it.
+    std::shared_ptr<const Font_snapshot> outstanding_atlas;
+    bool                                 atlas_enqueued_this_frame = false;
 
     std::vector<text_vertex_t>   vertices;
     std::vector<std::uint32_t>   indices;
@@ -127,8 +142,7 @@ struct Text_renderer::Impl
     QRhiRenderPassDescriptor* pipeline_render_pass = nullptr;
     int                       pipeline_samples     = 0;
 
-    int           atlas_size        = 0;
-    std::uint64_t uploaded_revision = 0;
+    int atlas_size = 0;
 
     std::size_t vertex_buffer_bytes  = 0;
     std::size_t index_buffer_bytes   = 0;
@@ -140,10 +154,16 @@ struct Text_renderer::Impl
 
     bool prepared = false;
 
-    std::uint64_t resource_generation = 0;
-    std::uint64_t pipeline_builds     = 0;
-    std::uint64_t atlas_uploads       = 0;
-    std::size_t   recorded_draws      = 0;
+    std::uint64_t resource_generation   = 0;
+    std::uint64_t pipeline_builds       = 0;
+    std::uint64_t atlas_upload_enqueues = 0;
+    std::size_t   recorded_draws        = 0;
+
+    /// The snapshot this frame draws, or the current one before anything queues.
+    [[nodiscard]] const std::shared_ptr<const Font_snapshot>& active_font() const
+    {
+        return frame_font ? frame_font : font;
+    }
 
     void clear_frame()
     {
@@ -151,7 +171,24 @@ struct Text_renderer::Impl
         indices.clear();
         uniforms.clear();
         draws.clear();
-        prepared = false;
+        frame_font.reset();
+        atlas_enqueued_this_frame = false;
+        prepared                  = false;
+    }
+
+    /**
+     * @brief Accept an enqueued atlas upload as submitted.
+     *
+     * Called only from record(), which the host runs inside the pass it opened
+     * with the batch prepare() filled. Until that happens the upload may still
+     * be released or abandoned unexecuted, so a frame that never gets here
+     * leaves the upload outstanding and the next prepare() enqueues it again.
+     */
+    void settle_outstanding_atlas()
+    {
+        if (outstanding_atlas) {
+            committed_atlas = std::move(outstanding_atlas);
+        }
     }
 
     void release_resources()
@@ -163,30 +200,36 @@ struct Text_renderer::Impl
         vertex_buffer.reset();
         sampler.reset();
         atlas_texture.reset();
-        uploaded_font.reset();
+        committed_atlas.reset();
+        outstanding_atlas.reset();
 
-        pipeline_render_pass = nullptr;
-        pipeline_samples     = 0;
-        atlas_size           = 0;
-        uploaded_revision    = 0;
-        vertex_buffer_bytes  = 0;
-        index_buffer_bytes   = 0;
-        uniform_buffer_bytes = 0;
-        prepared             = false;
+        pipeline_render_pass      = nullptr;
+        pipeline_samples          = 0;
+        atlas_size                = 0;
+        vertex_buffer_bytes       = 0;
+        index_buffer_bytes        = 0;
+        uniform_buffer_bytes      = 0;
+        atlas_enqueued_this_frame = false;
+        prepared                  = false;
 
         ++resource_generation;
     }
 
-    [[nodiscard]] text_result_t ensure_atlas(QRhi* device, QRhiResourceUpdateBatch* updates)
+    [[nodiscard]] text_result_t ensure_atlas(
+        QRhi*                                       device,
+        QRhiResourceUpdateBatch*                    updates,
+        const std::shared_ptr<const Font_snapshot>& snapshot)
     {
         // A snapshot only exists for a non-failed build, and such a build always
         // carries a sized bitmap with at least one glyph.
-        const atlas_t& atlas = font->atlas();
+        const atlas_t& atlas = snapshot->atlas();
 
-        if (atlas_texture &&
-            atlas_size == atlas.atlas_size &&
-            uploaded_revision == font->revision())
-        {
+        if (atlas_texture && committed_atlas == snapshot) {
+            return {};
+        }
+        // One enqueue per frame is enough: a second prepare() on the same frame
+        // would only overwrite the same command in the same batch.
+        if (atlas_enqueued_this_frame && outstanding_atlas == snapshot) {
             return {};
         }
 
@@ -197,12 +240,15 @@ struct Text_renderer::Impl
             if (!atlas_texture->create()) {
                 atlas_texture.reset();
                 atlas_size = 0;
+                committed_atlas.reset();
                 return detail::make_text_result(
                     Text_status::GPU_RESOURCE_FAILED,
                     "MSDF atlas texture could not be created");
             }
             atlas_size = atlas.atlas_size;
-            // The binding set names the old texture, so it is rebuilt below.
+            // A new texture holds nothing yet, and the binding set named the
+            // old one, so both facts are recorded before the upload goes in.
+            committed_atlas.reset();
             srb.reset();
         }
 
@@ -214,12 +260,19 @@ struct Text_renderer::Impl
             QImage::Format_RGBA8888);
         updates->uploadTexture(atlas_texture.get(), image);
 
-        uploaded_font     = font;
-        uploaded_revision = font->revision();
-        ++atlas_uploads;
+        outstanding_atlas         = snapshot;
+        atlas_enqueued_this_frame = true;
+        ++atlas_upload_enqueues;
         return {};
     }
 
+    /**
+     * @brief Create or grow one dynamic buffer.
+     *
+     * The caller decides what a replacement invalidates, because only the
+     * uniform buffer is named by the binding set: growing the vertex or index
+     * buffer must not cost a binding-set and pipeline rebuild.
+     */
     [[nodiscard]] text_result_t ensure_buffer(
         QRhi*                        device,
         std::unique_ptr<QRhiBuffer>& buffer,
@@ -247,8 +300,6 @@ struct Text_renderer::Impl
             return detail::make_text_result(Text_status::GPU_RESOURCE_FAILED, what);
         }
         capacity_bytes = capacity;
-        // A recreated buffer invalidates the binding set that named it.
-        srb.reset();
         return {};
     }
 
@@ -279,7 +330,10 @@ struct Text_renderer::Impl
                 "text shader resource bindings could not be created");
         }
 
-        // The pipeline was built against the previous layout's resources.
+        // A created pipeline keeps a raw pointer to the binding set it was made
+        // from, and backends still read it - the Metal one does so from
+        // setVertexInput() when no set has been bound for the pipeline yet - so
+        // the pipeline goes with the set that is being replaced.
         pipeline.reset();
         return {};
     }
@@ -407,15 +461,24 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
     if (batch.empty()) {
         return {};
     }
-    if (!d->font) {
+    if (state.clip.enabled && (state.clip.width < 0 || state.clip.height < 0)) {
+        return detail::make_text_result(
+            Text_status::INVALID_ARGUMENT,
+            "an enabled clip rectangle cannot have a negative width or height");
+    }
+
+    // The frame's first batch with geometry fixes its snapshot; a later
+    // set_font() therefore cannot move this frame's work onto another atlas.
+    const std::shared_ptr<const Font_snapshot>& snapshot = d->active_font();
+    if (!snapshot) {
         return detail::make_text_result(
             Text_status::NO_FONT,
             "text was queued before a font snapshot was set");
     }
-    if (!batch.font_identity() || *batch.font_identity() != d->font->identity()) {
+    if (!batch.font_identity() || *batch.font_identity() != snapshot->identity()) {
         return detail::make_text_result(
             Text_status::INVALID_ARGUMENT,
-            "the batch was laid out against a different font than the renderer's");
+            "the batch was laid out against a different font than this frame's");
     }
 
     const std::span<const text_vertex_t> batch_vertices = batch.vertices();
@@ -441,24 +504,43 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
             "the frame's text geometry exceeds one QRhi buffer");
     }
 
-    d->vertices.insert(d->vertices.end(), batch_vertices.begin(), batch_vertices.end());
-    d->indices.reserve(index_start + batch_indices.size());
-    const auto base = static_cast<std::uint32_t>(base_vertex);
-    for (std::uint32_t index : batch_indices) {
-        d->indices.push_back(index + base);
+    // Every container is grown before any of them is written, because prepare()
+    // walks the uniform blocks and the draw ops as one array: a half-applied
+    // queue would leave more blocks than ops for a later frame to index past.
+    // Past this point each append fits reserved capacity and cannot throw.
+    try {
+        d->vertices.reserve(base_vertex + batch_vertices.size());
+        d->indices.reserve(index_start + batch_indices.size());
+        d->uniforms.reserve(d->uniforms.size() + 1u);
+        d->draws.reserve(d->draws.size() + 1u);
+    }
+    catch (const std::bad_alloc&) {
+        return detail::make_text_result(
+            Text_status::OUT_OF_MEMORY,
+            "the frame's text geometry could not be allocated");
     }
 
     uniform_block_t block{};
     std::memcpy(block.transform, state.transform.data(), sizeof(block.transform));
     std::memcpy(block.color, state.color.data(), sizeof(block.color));
     block.px_range =
-        px_range_for_pixel_height(d->font->atlas(), d->font->draw_pixel_height());
-    d->uniforms.push_back(block);
+        px_range_for_pixel_height(snapshot->atlas(), snapshot->draw_pixel_height());
 
     draw_op_t op;
     op.index_start = static_cast<quint32>(index_start);
     op.index_count = static_cast<quint32>(batch_indices.size());
     op.clip        = state.clip;
+
+    if (!d->frame_font) {
+        d->frame_font = d->font;
+    }
+
+    d->vertices.insert(d->vertices.end(), batch_vertices.begin(), batch_vertices.end());
+    const auto base = static_cast<std::uint32_t>(base_vertex);
+    for (std::uint32_t index : batch_indices) {
+        d->indices.push_back(index + base);
+    }
+    d->uniforms.push_back(block);
     d->draws.push_back(op);
 
     d->prepared = false;
@@ -482,17 +564,16 @@ text_result_t Text_renderer::prepare(const frame_t& frame)
         d->rhi = frame.rhi;
     }
 
-    if (!d->font) {
-        if (d->draws.empty()) {
-            d->prepared = true;
-            return {};
-        }
-        return detail::make_text_result(
-            Text_status::NO_FONT,
-            "queued text cannot be prepared without a font snapshot");
+    // queue() captures a snapshot for every batch with geometry, so no font
+    // here means nothing was queued and there is no atlas to offer either.
+    const std::shared_ptr<const Font_snapshot>& snapshot = d->active_font();
+    if (!snapshot) {
+        d->prepared = true;
+        return {};
     }
 
-    const text_result_t atlas_ready = d->ensure_atlas(frame.rhi, frame.resource_updates);
+    const text_result_t atlas_ready =
+        d->ensure_atlas(frame.rhi, frame.resource_updates, snapshot);
     if (atlas_ready.status != Text_status::OK) {
         return atlas_ready;
     }
@@ -537,6 +618,8 @@ text_result_t Text_renderer::prepare(const frame_t& frame)
             "prepared text draw states exceed one QRhi uniform buffer");
     }
 
+    // The vertex and index buffers are named by the draw call, not by the
+    // binding set, so growing them leaves the bindings and the pipeline alone.
     const text_result_t vertex_ready = d->ensure_buffer(
         frame.rhi, d->vertex_buffer, d->vertex_buffer_bytes,
         QRhiBuffer::VertexBuffer, vertex_bytes,
@@ -553,12 +636,18 @@ text_result_t Text_renderer::prepare(const frame_t& frame)
         return index_ready;
     }
 
+    const QRhiBuffer* bound_uniform_buffer = d->uniform_buffer.get();
+
     const text_result_t uniform_ready = d->ensure_buffer(
         frame.rhi, d->uniform_buffer, d->uniform_buffer_bytes,
         QRhiBuffer::UniformBuffer, uniform_bytes,
         "text uniform buffer could not be created");
     if (uniform_ready.status != Text_status::OK) {
         return uniform_ready;
+    }
+    if (d->uniform_buffer.get() != bound_uniform_buffer) {
+        // The binding set names this buffer, so a replacement invalidates it.
+        d->srb.reset();
     }
 
     const text_result_t bindings_ready = d->ensure_bindings(frame.rhi);
@@ -599,6 +688,11 @@ text_result_t Text_renderer::record(const frame_t& frame)
             Text_status::INVALID_FRAME,
             "text recording needs a command buffer and a render target");
     }
+
+    // The host opened the pass this call records into with the resource-update
+    // batch prepare() filled, so getting here is where an enqueued atlas upload
+    // stops being one this renderer may have to offer again.
+    d->settle_outstanding_atlas();
 
     if (d->draws.empty()) {
         d->clear_frame();
@@ -655,9 +749,10 @@ void Text_renderer::release_resources()
 renderer_diagnostics_t Text_renderer::diagnostics() const
 {
     renderer_diagnostics_t out;
-    out.resource_generation  = d->resource_generation;
-    out.pipeline_builds      = d->pipeline_builds;
-    out.atlas_uploads        = d->atlas_uploads;
+    out.resource_generation   = d->resource_generation;
+    out.pipeline_builds       = d->pipeline_builds;
+    out.atlas_upload_enqueues = d->atlas_upload_enqueues;
+
     out.vertex_buffer_bytes  = d->vertex_buffer_bytes;
     out.index_buffer_bytes   = d->index_buffer_bytes;
     out.uniform_buffer_bytes = d->uniform_buffer_bytes;

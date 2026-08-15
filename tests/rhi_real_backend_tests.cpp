@@ -251,7 +251,18 @@ bool render_offscreen(
         readback.pixelSize.width(),
         readback.pixelSize.height(),
         QImage::Format_RGBA8888);
-    out_image = rhi.isYUpInFramebuffer() ? image.flipped(Qt::Vertical) : image.copy();
+    // One operation, two spellings across a Qt generation: flipped() arrived in
+    // Qt 6.9 and deprecates mirrored(), and this project supports Qt 6.7 up.
+    if (rhi.isYUpInFramebuffer()) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+        out_image = image.flipped(Qt::Vertical);
+#else
+        out_image = image.mirrored(false, true);
+#endif
+    }
+    else {
+        out_image = image.copy();
+    }
     return true;
 }
 
@@ -396,6 +407,44 @@ bool run_offscreen_gate(QRhi& rhi, const QString& image_path)
         ok &= check(
             clipped_coverage.count < drawn.count,
             "a clipped draw must rasterize less than the unclipped draw");
+    }
+
+    // Which half of the target a scissor keeps is the only direct evidence of
+    // the origin clip_rect_t documents. A full-height rectangle cannot show it,
+    // because it is the same rectangle either way up; a half-height one is not.
+    // Read-back images are top-left origin, so a scissor at y = 0 that keeps the
+    // lower half of the image is a bottom-left scissor.
+    const int split_y = k_target_height / 2;
+    ok &= check(
+        drawn.min_y < split_y && drawn.max_y > split_y,
+        "the clip fixture needs text crossing the target's middle row");
+
+    QImage lower_half;
+    const mtr::clip_rect_t lower_clip = { true, 0, 0, k_target_width, split_y };
+    ok &= render_offscreen(rhi, offscreen, renderer, font, lower_clip, lower_half);
+
+    QImage upper_half;
+    const mtr::clip_rect_t upper_clip = { true, 0, split_y, k_target_width, split_y };
+    ok &= render_offscreen(rhi, offscreen, renderer, font, upper_clip, upper_half);
+
+    if (ok) {
+        const coverage_t lower = measure_coverage(lower_half);
+        const coverage_t upper = measure_coverage(upper_half);
+        std::cout << "clip_origin_lower_y=[" << lower.min_y << "," << lower.max_y << "]"
+                  << " clip_origin_upper_y=[" << upper.min_y << "," << upper.max_y << "]\n";
+
+        ok &= check(
+            !lower.empty && !upper.empty,
+            "both half-target clips must still rasterize part of the text");
+        ok &= check(
+            lower.min_y >= split_y,
+            "a scissor at y = 0 must keep the lower half, as bottom-left origin means");
+        ok &= check(
+            upper.max_y < split_y,
+            "a scissor at y = height / 2 must keep the upper half");
+        ok &= check(
+            lower.count + upper.count == drawn.count,
+            "the two half-target clips must partition the unclipped coverage");
     }
 
     // A changed sample count must rebuild the pipeline even though the text did

@@ -3,17 +3,19 @@
 #include <vnm_msdf_text/rhi/text_batch.h>
 #include <vnm_msdf_text/rhi/text_renderer.h>
 
-#include "rhi/sha256.h"
-
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
 
+#include <QtCore/QByteArray>
+#include <QtCore/QByteArrayView>
+#include <QtCore/QCryptographicHash>
 #include <QtGui/QColor>
 #include <QtGui/QGuiApplication>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <fstream>
@@ -21,6 +23,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -30,7 +33,55 @@
 namespace msdf = vnm::msdf_text;
 namespace mtr  = vnm::msdf_text::rhi;
 
+// -----------------------------------------------------------------------------
+// Allocation fault seam
+//
+// The containers a queued frame and a batch grow are allocated by this
+// executable, so replacing the global allocator is enough to make one chosen
+// allocation inside one chosen call fail. The counter is armed only inside
+// Failing_allocation's scope, which wraps a single component call that performs
+// no Qt work of its own, so nothing else in the process is affected.
+// -----------------------------------------------------------------------------
+
 namespace {
+int g_allocations_before_failure = -1;
+}
+
+void* operator new(std::size_t size)
+{
+    if (g_allocations_before_failure >= 0) {
+        if (g_allocations_before_failure == 0) {
+            g_allocations_before_failure = -1;
+            throw std::bad_alloc();
+        }
+        --g_allocations_before_failure;
+    }
+
+    void* memory = std::malloc(size > 0 ? size : 1);
+    if (!memory) {
+        throw std::bad_alloc();
+    }
+    return memory;
+}
+
+void* operator new[](std::size_t size)                { return ::operator new(size); }
+void  operator delete(void* memory) noexcept          { std::free(memory); }
+void  operator delete[](void* memory) noexcept        { std::free(memory); }
+void  operator delete(void* memory, std::size_t) noexcept   { std::free(memory); }
+void  operator delete[](void* memory, std::size_t) noexcept { std::free(memory); }
+
+namespace {
+
+/// Arms the allocation after @p survivors further allocations to fail.
+class Failing_allocation
+{
+public:
+    explicit Failing_allocation(int survivors) { g_allocations_before_failure = survivors; }
+    ~Failing_allocation() { g_allocations_before_failure = -1; }
+
+    Failing_allocation(const Failing_allocation&)            = delete;
+    Failing_allocation& operator=(const Failing_allocation&) = delete;
+};
 
 constexpr int k_draw_pixel_height = 24;
 constexpr int k_atlas_size        = 512;
@@ -131,19 +182,74 @@ std::string hex(std::span<const std::uint8_t> bytes)
 // Font snapshot: build status, identity, and revision
 // -----------------------------------------------------------------------------
 
-bool test_sha256_known_answer()
+void expected_u32(QCryptographicHash& hash, std::uint32_t value)
 {
-    // FIPS 180-4 example: SHA-256("abc").
-    const std::string_view input = "abc";
+    const char bytes[4] = {
+        static_cast<char>((value >> 24) & 0xFFu),
+        static_cast<char>((value >> 16) & 0xFFu),
+        static_cast<char>((value >>  8) & 0xFFu),
+        static_cast<char>( value        & 0xFFu),
+    };
+    hash.addData(QByteArrayView(bytes, sizeof(bytes)));
+}
 
-    mtr::detail::Sha256 hash;
-    hash.update(std::span<const std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(input.data()), input.size()));
+void expected_f32(QCryptographicHash& hash, float value)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    expected_u32(hash, bits);
+}
+
+void expected_f64(QCryptographicHash& hash, double value)
+{
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    expected_u32(hash, static_cast<std::uint32_t>(bits >> 32));
+    expected_u32(hash, static_cast<std::uint32_t>(bits & 0xFFFFFFFFu));
+}
+
+// The identity is a SHA-256 over a fixed serialization of the build inputs.
+// Rebuilding that byte stream here from the documented order pins the contract:
+// a field dropped, reordered, or written at another width changes the digest,
+// and so does swapping the digest for something that is not SHA-256.
+bool test_identity_is_the_serialized_build_inputs()
+{
+    const msdf::options_t       options    = snapshot_options();
+    const std::vector<char32_t> codepoints = covered_codepoints();
+
+    const mtr::font_snapshot_result_t built = build_sample_snapshot();
+    if (!check(built.snapshot != nullptr, "the sample snapshot must build")) {
+        return false;
+    }
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(QByteArrayView(
+        reinterpret_cast<const char*>(test_font().data()),
+        static_cast<qsizetype>(test_font().size())));
+    expected_u32(hash, static_cast<std::uint32_t>(test_font().size()));
+    expected_u32(hash, static_cast<std::uint32_t>(k_draw_pixel_height));
+
+    expected_u32(hash, static_cast<std::uint32_t>(options.atlas_size));
+    expected_f64(hash, options.min_atlas_font_size);
+    expected_f32(hash, options.atlas_px_range);
+    expected_f32(hash, options.sharpness_bias);
+    expected_u32(hash, static_cast<std::uint32_t>(options.atlas_gutter_px));
+    expected_u32(hash, options.build_kerning_table ? 1u : 0u);
+    expected_u32(hash, static_cast<std::uint32_t>(options.missing_glyph_policy));
+
+    expected_u32(hash, static_cast<std::uint32_t>(codepoints.size()));
+    for (char32_t codepoint : codepoints) {
+        expected_u32(hash, static_cast<std::uint32_t>(codepoint));
+    }
+
+    const QByteArray expected = hash.result();
+    const std::string expected_hex = hex(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(expected.constData()),
+        static_cast<std::size_t>(expected.size())));
 
     return check(
-        hex(hash.finish()) ==
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        "the snapshot digest must be standard SHA-256");
+        hex(built.snapshot->identity().digest) == expected_hex,
+        "the identity must be SHA-256 over the documented build-input serialization");
 }
 
 bool test_snapshot_rejects_invalid_arguments()
@@ -447,6 +553,68 @@ bool test_batch_rejects_invalid_geometry()
     return ok;
 }
 
+bool test_batch_survives_allocation_failure()
+{
+    const mtr::Font_snapshot& font = shared_snapshot();
+
+    const std::vector<msdf::text_vertex_t> vertices(4, msdf::text_vertex_t{});
+    const std::vector<std::uint32_t>       indices = {0, 1, 2, 0, 2, 3};
+
+    bool ok       = true;
+    int  failures = 0;
+
+    // Which allocation a growing vector makes is an implementation detail, so
+    // every early allocation of the call is armed in turn and each outcome has
+    // to be either a clean success or a failure that changed nothing.
+    for (int survivors = 0; survivors < 4; ++survivors) {
+        mtr::Text_batch    run_batch;
+        mtr::text_result_t appended{};
+        {
+            Failing_allocation fail(survivors);
+            appended = run_batch.append_run(font, "Varinomics 0123456789", 4.0f, 20.0f);
+        }
+        if (appended.status == mtr::Text_status::OK) {
+            continue;
+        }
+
+        ++failures;
+        ok &= check_status(
+            appended,
+            mtr::Text_status::OUT_OF_MEMORY,
+            "a run that could not be allocated must report out of memory");
+        ok &= check(
+            run_batch.empty() && !run_batch.font_identity().has_value(),
+            "a failed run must leave the batch empty and without a font identity");
+
+        // The same batch must still be usable afterwards.
+        ok &= check_status(
+            run_batch.append_run(font, "Varinomics", 4.0f, 20.0f),
+            mtr::Text_status::OK,
+            "a batch must still accept a run after an allocation failure");
+        ok &= check(!run_batch.empty(), "the recovered run must be kept");
+
+        mtr::Text_batch    quad_batch;
+        mtr::text_result_t quads{};
+        {
+            Failing_allocation fail(survivors);
+            quads = quad_batch.append_quads(font, vertices, indices);
+        }
+        if (quads.status != mtr::Text_status::OK) {
+            ok &= check_status(
+                quads,
+                mtr::Text_status::OUT_OF_MEMORY,
+                "quads that could not be allocated must report out of memory");
+            ok &= check(
+                quad_batch.empty() && quad_batch.vertices().empty() &&
+                    !quad_batch.font_identity().has_value(),
+                "a failed quad append must leave neither vertices nor an identity behind");
+        }
+    }
+
+    ok &= check(failures > 0, "the allocation seam must actually fail an append");
+    return ok;
+}
+
 // -----------------------------------------------------------------------------
 // Null QRhi: frame status, command recording, and resource lifecycle
 // -----------------------------------------------------------------------------
@@ -570,7 +738,7 @@ bool test_null_records_prepared_text()
 
     const mtr::renderer_diagnostics_t after = renderer.diagnostics();
     ok &= check(after.recorded_draws == 1, "one queued draw state must record one draw");
-    ok &= check(after.atlas_uploads == 1, "the first frame must upload the atlas once");
+    ok &= check(after.atlas_upload_enqueues == 1, "the first frame must upload the atlas once");
     ok &= check(after.pipeline_builds == 1, "the first frame must build the pipeline once");
     ok &= check(after.vertex_buffer_bytes > 0, "the first frame must allocate a vertex buffer");
     ok &= check(after.queued_draws == 0, "recording must clear the queued frame");
@@ -769,7 +937,7 @@ bool test_null_resource_recreation_causes()
         "the second frame must record");
     const mtr::renderer_diagnostics_t unchanged = renderer.diagnostics();
     ok &= check(
-        unchanged.atlas_uploads == first.atlas_uploads &&
+        unchanged.atlas_upload_enqueues == first.atlas_upload_enqueues &&
             unchanged.pipeline_builds == first.pipeline_builds &&
             unchanged.resource_generation == first.resource_generation,
         "an unchanged frame must not rebuild or re-upload anything");
@@ -794,7 +962,8 @@ bool test_null_resource_recreation_causes()
         renderer.diagnostics().pipeline_builds > grown.pipeline_builds,
         "a different render pass must rebuild the pipeline");
 
-    // A rebuilt snapshot has a new revision even at an identical identity.
+    // A rebuilt snapshot is a different object with its own storage, so it is
+    // uploaded again even though it describes the same font.
     const mtr::font_snapshot_result_t rebuilt = build_sample_snapshot();
     if (!check(rebuilt.snapshot != nullptr, "the rebuilt snapshot must build")) {
         return false;
@@ -809,8 +978,8 @@ bool test_null_resource_recreation_causes()
         mtr::Text_status::OK,
         "the frame after a font rebuild must record");
     ok &= check(
-        renderer.diagnostics().atlas_uploads == before_rebuild.atlas_uploads + 1,
-        "a new snapshot revision must re-upload the atlas");
+        renderer.diagnostics().atlas_upload_enqueues == before_rebuild.atlas_upload_enqueues + 1,
+        "a rebuilt snapshot must be uploaded again");
 
     // An explicit release drops the device-local set and rebuilds it.
     const mtr::renderer_diagnostics_t before_release = renderer.diagnostics();
@@ -825,7 +994,7 @@ bool test_null_resource_recreation_causes()
         mtr::Text_status::OK,
         "the frame after a release must record");
     ok &= check(
-        renderer.diagnostics().atlas_uploads == released.atlas_uploads + 1 &&
+        renderer.diagnostics().atlas_upload_enqueues == released.atlas_upload_enqueues + 1 &&
             renderer.diagnostics().pipeline_builds == released.pipeline_builds + 1,
         "a released renderer must upload and rebuild before recording again");
 
@@ -873,7 +1042,7 @@ bool test_null_resources_are_device_local()
         "the first device's frame must record");
     const mtr::renderer_diagnostics_t first_only = first_renderer.diagnostics();
     ok &= check(
-        second_renderer.diagnostics().atlas_uploads == 0 &&
+        second_renderer.diagnostics().atlas_upload_enqueues == 0 &&
             second_renderer.diagnostics().pipeline_builds == 0,
         "one renderer's frame must not create the other renderer's resources");
 
@@ -883,11 +1052,11 @@ bool test_null_resources_are_device_local()
         mtr::Text_status::OK,
         "the second device's frame must record");
     ok &= check(
-        second_renderer.diagnostics().atlas_uploads == 1 &&
+        second_renderer.diagnostics().atlas_upload_enqueues == 1 &&
             second_renderer.diagnostics().pipeline_builds == 1,
         "the second renderer must build its own device-local resources");
     ok &= check(
-        first_renderer.diagnostics().atlas_uploads == first_only.atlas_uploads &&
+        first_renderer.diagnostics().atlas_upload_enqueues == first_only.atlas_upload_enqueues &&
             first_renderer.diagnostics().pipeline_builds == first_only.pipeline_builds,
         "the second device's frame must not disturb the first renderer");
 
@@ -945,7 +1114,7 @@ bool test_null_device_change_rebuilds_resources()
         after_second.resource_generation == after_first.resource_generation + 1,
         "a new device must drop the previous device-local resource set");
     ok &= check(
-        after_second.atlas_uploads == after_first.atlas_uploads + 1 &&
+        after_second.atlas_upload_enqueues == after_first.atlas_upload_enqueues + 1 &&
             after_second.pipeline_builds == after_first.pipeline_builds + 1,
         "a new device must rebuild and re-upload every device-local resource");
 
@@ -1019,6 +1188,450 @@ bool test_null_multiple_draw_states_record_separately()
     return ok;
 }
 
+// A frame's font is fixed by its first batch with geometry. Replacing the
+// renderer's font afterwards must leave that frame drawing what it queued, and
+// the atlas the next frame reuses is the evidence: if the replacement had been
+// uploaded instead, coming back to the first snapshot would have to upload again.
+bool test_null_font_replacement_does_not_move_a_queued_frame()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    Offscreen_target      offscreen(*rhi, QSize(320, 64), 1);
+
+    const mtr::font_snapshot_result_t first  = build_sample_snapshot();
+    const mtr::font_snapshot_result_t second = build_sample_snapshot(k_draw_pixel_height * 2);
+    if (!check(
+            rhi != nullptr && offscreen.valid() &&
+                first.snapshot != nullptr && second.snapshot != nullptr,
+            "the Null fixture and both snapshots must be available"))
+    {
+        return false;
+    }
+
+    mtr::Text_batch first_batch;
+    mtr::Text_batch second_batch;
+    bool ok = check_status(
+        first_batch.append_run(*first.snapshot, "Varinomics", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the first snapshot's run must be appended");
+    ok &= check_status(
+        second_batch.append_run(*second.snapshot, "Varinomics", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the second snapshot's run must be appended");
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(first.snapshot);
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the offscreen frame must begin"))
+    {
+        return false;
+    }
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(first_batch, mtr::draw_state_t{}),
+        mtr::Text_status::OK,
+        "the first snapshot's batch must queue");
+
+    // The replacement arrives after the frame already holds text.
+    renderer.set_font(second.snapshot);
+    ok &= check(
+        renderer.font() == second.snapshot,
+        "set_font must report the snapshot the next frame will draw");
+    ok &= check_status(
+        renderer.queue(second_batch, mtr::draw_state_t{}),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a batch from the replacement font must not join a frame queued against another");
+    ok &= check(
+        renderer.diagnostics().queued_draws == 1,
+        "the rejected batch must not be queued");
+
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the frame must prepare");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the frame must record");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+
+    const mtr::renderer_diagnostics_t replaced = renderer.diagnostics();
+    ok &= check(replaced.recorded_draws == 1, "the frame must record the batch it queued");
+    ok &= check(
+        replaced.atlas_upload_enqueues == 1,
+        "a frame queued against one snapshot must offer exactly that snapshot's atlas");
+
+    // Going back to the first snapshot needs no upload, which is only true if
+    // the frame above uploaded that snapshot rather than the replacement.
+    renderer.set_font(first.snapshot);
+    mtr::text_result_t prepared{};
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, first_batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the frame back on the first snapshot must record");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == replaced.atlas_upload_enqueues,
+        "the atlas the replaced frame uploaded must be the one it was queued against");
+
+    // The replacement itself takes effect for the next frame that queues it.
+    renderer.set_font(second.snapshot);
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, second_batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the replacement snapshot must draw in a later frame");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == replaced.atlas_upload_enqueues + 1,
+        "the replacement snapshot's atlas must be uploaded when it is first drawn");
+
+    renderer.release_resources();
+    return ok;
+}
+
+// An enqueued upload is not an executed one. A host that releases the batch and
+// drops the frame has run nothing, so the renderer must still owe that upload.
+bool test_null_cancelled_update_batch_is_uploaded_again()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    Offscreen_target      offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(
+            rhi != nullptr && offscreen.valid() && held.snapshot != nullptr,
+            "the Null fixture must be available"))
+    {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch batch;
+    bool ok = check_status(
+        batch.append_run(*held.snapshot, "Varinomics", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the sample run must be appended");
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the cancelled frame must begin"))
+    {
+        return false;
+    }
+
+    mtr::frame_t cancelled;
+    cancelled.rhi              = rhi.get();
+    cancelled.command_buffer   = cb;
+    cancelled.render_target    = offscreen.target();
+    cancelled.resource_updates = rhi->nextResourceUpdateBatch();
+
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(batch, mtr::draw_state_t{}), mtr::Text_status::OK, "the run must queue");
+    ok &= check_status(renderer.prepare(cancelled), mtr::Text_status::OK, "the frame must prepare");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 1,
+        "preparation must put the atlas upload into the frame's batch");
+
+    // The host returns the batch to the pool unsubmitted and abandons the frame.
+    cancelled.resource_updates->release();
+    renderer.reset_frame();
+    rhi->endOffscreenFrame();
+
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 1,
+        "abandoning a frame must not count as a second offer");
+
+    mtr::text_result_t prepared{};
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the frame after the cancelled one must record");
+    ok &= check_status(prepared, mtr::Text_status::OK, "the frame after the cancelled one prepares");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 2,
+        "an upload whose batch was cancelled must be enqueued again");
+
+    // Once a frame carrying the upload reached recording, it is settled.
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the following frame must record");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 2,
+        "a submitted upload must not be offered again");
+
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_null_rejects_unusable_clip_rectangles()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    Offscreen_target      offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(
+            rhi != nullptr && offscreen.valid() && held.snapshot != nullptr,
+            "the Null fixture must be available"))
+    {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch batch;
+    bool ok = check_status(
+        batch.append_run(*held.snapshot, "Varinomics", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the sample run must be appended");
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the offscreen frame must begin"))
+    {
+        return false;
+    }
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+
+    mtr::draw_state_t zero;
+    zero.clip = { true, 0, 0, 0, 0 };
+
+    mtr::draw_state_t partly_outside;
+    partly_outside.clip = { true, -16, -8, 64, 32 };
+
+    mtr::draw_state_t negative_width;
+    negative_width.clip = { true, 0, 0, -4, 32 };
+
+    mtr::draw_state_t negative_height;
+    negative_height.clip = { true, 0, 0, 64, -4 };
+
+    mtr::draw_state_t disabled_negative;
+    disabled_negative.clip = { false, 0, 0, -4, -4 };
+
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(batch, zero),
+        mtr::Text_status::OK,
+        "a zero-sized clip is a rectangle QRhi can express and must be accepted");
+    ok &= check_status(
+        renderer.queue(batch, partly_outside),
+        mtr::Text_status::OK,
+        "a partly out-of-bounds clip must be accepted and left to QRhi to clamp");
+    ok &= check_status(
+        renderer.queue(batch, negative_width),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a negative clip width must be rejected");
+    ok &= check_status(
+        renderer.queue(batch, negative_height),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a negative clip height must be rejected");
+    ok &= check_status(
+        renderer.queue(batch, disabled_negative),
+        mtr::Text_status::OK,
+        "a disabled clip is not a scissor and its size does not matter");
+    ok &= check(
+        renderer.diagnostics().queued_draws == 3,
+        "only the acceptable clips must be queued");
+
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the frame must prepare");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the frame must record");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+
+    ok &= check(
+        renderer.diagnostics().recorded_draws == 3,
+        "every accepted clip must record its draw");
+
+    renderer.release_resources();
+    return ok;
+}
+
+// Only the uniform buffer and the atlas texture are named by the binding set,
+// so growing the vertex and index buffers must cost neither a binding rebuild
+// nor a pipeline build.
+bool test_null_geometry_growth_keeps_the_pipeline()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    Offscreen_target      offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(
+            rhi != nullptr && offscreen.valid() && held.snapshot != nullptr,
+            "the Null fixture must be available"))
+    {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch    batch;
+    mtr::text_result_t prepared{};
+    bool ok = check_status(
+        batch.append_run(*held.snapshot, "V", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the first run must be appended");
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the first frame must record");
+
+    const mtr::renderer_diagnostics_t first = renderer.diagnostics();
+    ok &= check(first.pipeline_builds == 1, "the first frame must build one pipeline");
+
+    // Four rounds of growth, each large enough to outgrow the doubling buffer.
+    std::size_t previous_vertex_bytes = first.vertex_buffer_bytes;
+    int         growths               = 0;
+    for (int round = 0; round < 4; ++round) {
+        for (int line = 0; line < 48; ++line) {
+            ok &= check_status(
+                batch.append_run(
+                    *held.snapshot, "Varinomics 0123456789", 8.0f, 40.0f + float(line)),
+                mtr::Text_status::OK,
+                "the growing run must be appended");
+        }
+        ok &= check_status(
+            run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+            mtr::Text_status::OK,
+            "the growing frame must record");
+
+        const mtr::renderer_diagnostics_t grown = renderer.diagnostics();
+        if (grown.vertex_buffer_bytes > previous_vertex_bytes) {
+            ++growths;
+            previous_vertex_bytes = grown.vertex_buffer_bytes;
+        }
+        ok &= check(
+            grown.pipeline_builds == first.pipeline_builds,
+            "growing the vertex and index buffers must not rebuild the pipeline");
+        ok &= check(
+            grown.resource_generation == first.resource_generation &&
+                grown.atlas_upload_enqueues == first.atlas_upload_enqueues,
+            "growing geometry must not drop resources or re-offer the atlas");
+    }
+
+    ok &= check(growths > 0, "the growing frames must actually have grown a buffer");
+    ok &= check(
+        renderer.diagnostics().index_buffer_bytes > first.index_buffer_bytes,
+        "the index buffer must have grown as well");
+
+    renderer.release_resources();
+    return ok;
+}
+
+// A queued frame is walked as one array of uniform blocks and draw ops, so a
+// failed allocation must leave both of them exactly as they were.
+bool test_null_queue_survives_allocation_failure()
+{
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(held.snapshot != nullptr, "the renderer's snapshot must build")) {
+        return false;
+    }
+
+    mtr::Text_batch small;
+    mtr::Text_batch large;
+    bool ok = check_status(
+        small.append_run(*held.snapshot, "V", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the small run must be appended");
+    for (int line = 0; line < 64; ++line) {
+        ok &= check_status(
+            large.append_run(*held.snapshot, "Varinomics 0123456789", 8.0f, 40.0f + float(line)),
+            mtr::Text_status::OK,
+            "the large run must be appended");
+    }
+
+    int failures = 0;
+    for (int survivors = 0; survivors < 4; ++survivors) {
+        std::unique_ptr<QRhi> rhi = make_null_rhi();
+        Offscreen_target      offscreen(*rhi, QSize(320, 64), 1);
+        if (!check(
+                rhi != nullptr && offscreen.valid(), "the Null fixture must be available"))
+        {
+            return false;
+        }
+
+        mtr::Text_renderer renderer;
+        renderer.set_font(held.snapshot);
+
+        renderer.begin_frame();
+        ok &= check_status(
+            renderer.queue(small, mtr::draw_state_t{}),
+            mtr::Text_status::OK,
+            "the first draw must queue");
+        const std::size_t queued_indices = renderer.diagnostics().queued_indices;
+
+        mtr::text_result_t queued{};
+        {
+            Failing_allocation fail(survivors);
+            queued = renderer.queue(large, mtr::draw_state_t{});
+        }
+        if (queued.status == mtr::Text_status::OK) {
+            continue;
+        }
+
+        ++failures;
+        ok &= check_status(
+            queued,
+            mtr::Text_status::OUT_OF_MEMORY,
+            "a queue that could not be allocated must report out of memory");
+        ok &= check(
+            renderer.diagnostics().queued_draws == 1 &&
+                renderer.diagnostics().queued_indices == queued_indices,
+            "a failed queue must leave the frame exactly as it was");
+
+        // The frame must still be consistent enough to prepare and record, which
+        // is what a leftover uniform block without its draw op would break.
+        ok &= check_status(
+            renderer.queue(small, mtr::draw_state_t{}),
+            mtr::Text_status::OK,
+            "the frame must still accept work after a failed queue");
+        ok &= check(
+            renderer.diagnostics().queued_draws == 2, "the retried draw must be queued");
+
+        QRhiCommandBuffer* cb = nullptr;
+        if (!check(
+                rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+                "the offscreen frame must begin"))
+        {
+            return false;
+        }
+
+        mtr::frame_t frame;
+        frame.rhi              = rhi.get();
+        frame.command_buffer   = cb;
+        frame.render_target    = offscreen.target();
+        frame.resource_updates = rhi->nextResourceUpdateBatch();
+
+        ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the frame must prepare");
+        cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+        cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+        ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the frame must record");
+        cb->endPass();
+        rhi->endOffscreenFrame();
+
+        ok &= check(
+            renderer.diagnostics().recorded_draws == 2,
+            "the frame must record exactly the draws it kept");
+
+        renderer.release_resources();
+    }
+
+    ok &= check(failures > 0, "the allocation seam must actually fail a queue");
+    return ok;
+}
+
 bool run_test(const char* name, bool (*test)())
 {
     try {
@@ -1046,7 +1659,7 @@ int main(int argc, char** argv)
     QGuiApplication app(argc, argv);
 
     bool ok = true;
-    ok &= run_test("snapshot digest is standard sha256", test_sha256_known_answer);
+    ok &= run_test("identity is the serialized build inputs", test_identity_is_the_serialized_build_inputs);
     ok &= run_test("snapshot rejects invalid arguments", test_snapshot_rejects_invalid_arguments);
     ok &= run_test("snapshot reports build failure", test_snapshot_reports_build_failure);
     ok &= run_test("snapshot reports partial build", test_snapshot_reports_partial_build);
@@ -1054,6 +1667,7 @@ int main(int argc, char** argv)
     ok &= run_test("batch matches cpu quads", test_batch_matches_cpu_quads);
     ok &= run_test("batch agrees with measurement and bounds", test_batch_agrees_with_measurement_and_bounds);
     ok &= run_test("batch rejects invalid geometry", test_batch_rejects_invalid_geometry);
+    ok &= run_test("batch survives allocation failure", test_batch_survives_allocation_failure);
     ok &= run_test("null records prepared text", test_null_records_prepared_text);
     ok &= run_test("null reports frame and font failures", test_null_reports_frame_and_font_failures);
     ok &= run_test("null queue after prepare is not recorded", test_null_queue_after_prepare_is_not_recorded);
@@ -1061,5 +1675,10 @@ int main(int argc, char** argv)
     ok &= run_test("null resources are device local", test_null_resources_are_device_local);
     ok &= run_test("null device change rebuilds resources", test_null_device_change_rebuilds_resources);
     ok &= run_test("null multiple draw states record separately", test_null_multiple_draw_states_record_separately);
+    ok &= run_test("null font replacement does not move a queued frame", test_null_font_replacement_does_not_move_a_queued_frame);
+    ok &= run_test("null cancelled update batch is uploaded again", test_null_cancelled_update_batch_is_uploaded_again);
+    ok &= run_test("null rejects unusable clip rectangles", test_null_rejects_unusable_clip_rectangles);
+    ok &= run_test("null geometry growth keeps the pipeline", test_null_geometry_growth_keeps_the_pipeline);
+    ok &= run_test("null queue survives allocation failure", test_null_queue_survives_allocation_failure);
     return ok ? 0 : 1;
 }

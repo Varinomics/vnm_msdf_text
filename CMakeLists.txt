@@ -1,4 +1,8 @@
-cmake_minimum_required(VERSION 3.16)
+# 3.22 is the floor because the Windows test registration below relies on the
+# ENVIRONMENT_MODIFICATION test property, which older CMake stores and ignores.
+# The installed package itself imposes no such requirement, so the generated
+# package-smoke consumers keep declaring the older floor a consumer may use.
+cmake_minimum_required(VERSION 3.22)
 
 project(vnm_msdf_text
   VERSION 0.2.0
@@ -303,7 +307,6 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
     src/rhi/font_snapshot.cpp
     src/rhi/text_batch.cpp
     src/rhi/text_renderer.cpp
-    src/rhi/sha256.h
     include/vnm_msdf_text/rhi/font_snapshot.h
     include/vnm_msdf_text/rhi/status.h
     include/vnm_msdf_text/rhi/text_batch.h
@@ -320,8 +323,6 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
   target_include_directories(vnm_msdf_text_rhi
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 
   target_compile_features(vnm_msdf_text_rhi PUBLIC cxx_std_20)
@@ -417,10 +418,6 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
         vnm_msdf_text_rhi
         Qt6::GuiPrivate
     )
-    target_include_directories(vnm_msdf_text_rhi_tests
-      PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
     target_compile_features(vnm_msdf_text_rhi_tests PRIVATE cxx_std_20)
     target_compile_definitions(vnm_msdf_text_rhi_tests PRIVATE
       VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
@@ -494,6 +491,12 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
       endif()
     endif()
 
+    # The source-consumer gate lives in tests/source_consumer as a project of
+    # its own and is configured, built, and run as one. It is deliberately not
+    # registered here: configuring it detects a compiler and building it invokes
+    # one, and this machine's build policy requires that every such command be
+    # leased explicitly instead of being started from inside a test run.
+
     unset(_vnm_msdf_text_qt_bin_dir)
     unset(_vnm_msdf_text_qt_bin_native)
     unset(_vnm_msdf_text_qt_core_dll)
@@ -501,6 +504,12 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
   endif()
 
   if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
+    # Installs the package and inspects what it exports. Every consumer it
+    # configures is a LANGUAGES NONE project, so this test detects no compiler
+    # and starts no build. Whether the installed headers and imported targets
+    # actually compile and link is proven by tests/package_consumer, which is
+    # configured and built as a project of its own for the same reason
+    # tests/source_consumer is.
     add_test(
       NAME vnm_msdf_text_package_smoke
       COMMAND ${CMAKE_COMMAND}
@@ -508,13 +517,9 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
         "-DVNM_MSDF_TEXT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
         "-DVNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT=${VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT}"
         "-DVNM_MSDF_TEXT_PROJECT_VERSION=${PROJECT_VERSION}"
-        "-DVNM_MSDF_TEXT_TEST_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
         "-DVNM_MSDF_TEXT_TEST_CONFIG=$<CONFIG>"
         "-DVNM_MSDF_TEXT_TEST_GENERATOR=${CMAKE_GENERATOR}"
         "-DVNM_MSDF_TEXT_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
-        "-DVNM_MSDF_TEXT_TEST_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
-        "-DVNM_MSDF_TEXT_TEST_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
-        "-DVNM_MSDF_TEXT_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_smoke.cmake")
   endif()
 endif()
@@ -523,8 +528,13 @@ if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
   include(GNUInstallDirs)
   include(CMakePackageConfigHelpers)
 
+  # The QRhi component is not part of the installed export, so its headers stay
+  # out of the installed tree too. They are Qt-free and would compile against an
+  # installed package that has no library to satisfy them, which is a link error
+  # discovered by a consumer instead of a boundary stated by the package.
   install(DIRECTORY include/vnm_msdf_text
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    PATTERN "rhi" EXCLUDE
   )
   install(FILES
     LICENSE.txt
