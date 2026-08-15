@@ -177,16 +177,18 @@ struct Text_renderer::Impl
     }
 
     /**
-     * @brief Accept an enqueued atlas upload as submitted.
+     * @brief Accept this frame's enqueued atlas upload as submitted.
      *
      * Called only from record(), which the host runs inside the pass it opened
-     * with the batch prepare() filled. Until that happens the upload may still
-     * be released or abandoned unexecuted, so a frame that never gets here
-     * leaves the upload outstanding and the next prepare() enqueues it again.
+     * with the batch prepare() filled. Only an upload this frame enqueued was
+     * in that batch: one still outstanding from an earlier frame went into a
+     * batch this pass says nothing about, so it stays outstanding for the next
+     * prepare() to enqueue again. Until a frame carrying an upload gets here it
+     * may still be released or abandoned unexecuted.
      */
     void settle_outstanding_atlas()
     {
-        if (outstanding_atlas) {
+        if (atlas_enqueued_this_frame && outstanding_atlas) {
             committed_atlas = std::move(outstanding_atlas);
         }
     }
@@ -690,8 +692,10 @@ text_result_t Text_renderer::record(const frame_t& frame)
     }
 
     // The host opened the pass this call records into with the resource-update
-    // batch prepare() filled, so getting here is where an enqueued atlas upload
-    // stops being one this renderer may have to offer again.
+    // batch prepare() filled, so getting here is where an upload this frame
+    // enqueued stops being one this renderer may have to offer again. This runs
+    // before the checks below because a frame can enqueue the atlas, fail a
+    // later step, and still have had its batch submitted.
     d->settle_outstanding_atlas();
 
     if (d->draws.empty()) {

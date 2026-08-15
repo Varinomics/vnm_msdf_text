@@ -229,9 +229,11 @@ public:
      * Reaching this call with a usable frame is the one point in the sequence
      * at which the renderer knows the host got past submitting the batch
      * prepare() filled: the host opens the pass this call records into with
-     * that batch. An outstanding atlas upload is settled here and not before.
-     * That is a statement about submission only; nothing in this API observes
-     * GPU execution, presentation, or display.
+     * that batch. An atlas upload this frame enqueued is settled here and not
+     * before; one an earlier frame left outstanding is not, because no batch
+     * this frame submitted carried it. That is a statement about submission
+     * only; nothing in this API observes GPU execution, presentation, or
+     * display.
      *
      * The pipeline declares scissor use, so every draw sets a scissor: the
      * draw state's clip rectangle, or the render target's full pixel size. The

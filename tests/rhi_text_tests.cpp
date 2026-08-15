@@ -1369,6 +1369,126 @@ bool test_null_cancelled_update_batch_is_uploaded_again()
     return ok;
 }
 
+// Reaching record() settles the upload the frame's own prepare() enqueued, not
+// whatever is still outstanding. A frame that queues text and records without a
+// successful prepare() opened its pass with a batch that carried no atlas, so an
+// upload an earlier frame abandoned is still owed; committing it here would let
+// the renderer treat an atlas texture nothing was ever uploaded into as current.
+bool test_null_unprepared_record_does_not_settle_an_abandoned_upload()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    Offscreen_target      offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(
+            rhi != nullptr && offscreen.valid() && held.snapshot != nullptr,
+            "the Null fixture must be available"))
+    {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch batch;
+    bool ok = check_status(
+        batch.append_run(*held.snapshot, "Varinomics", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the sample run must be appended");
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the abandoned frame must begin"))
+    {
+        return false;
+    }
+
+    mtr::frame_t abandoned;
+    abandoned.rhi              = rhi.get();
+    abandoned.command_buffer   = cb;
+    abandoned.render_target    = offscreen.target();
+    abandoned.resource_updates = rhi->nextResourceUpdateBatch();
+
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(batch, mtr::draw_state_t{}), mtr::Text_status::OK, "the run must queue");
+    ok &= check_status(
+        renderer.prepare(abandoned), mtr::Text_status::OK, "the abandoned frame must prepare");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 1,
+        "preparation must put the atlas upload into the abandoned frame's batch");
+
+    // The host returns that batch to the pool unsubmitted and drops the frame,
+    // so the upload it holds executed nothing.
+    abandoned.resource_updates->release();
+    renderer.reset_frame();
+    rhi->endOffscreenFrame();
+
+    // The next frame queues text and reaches recording without preparing, so
+    // the batch it opened its pass with carried no atlas upload at all.
+    cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the unprepared frame must begin"))
+    {
+        return false;
+    }
+
+    mtr::frame_t unprepared;
+    unprepared.rhi              = rhi.get();
+    unprepared.command_buffer   = cb;
+    unprepared.render_target    = offscreen.target();
+    unprepared.resource_updates = rhi->nextResourceUpdateBatch();
+
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(batch, mtr::draw_state_t{}),
+        mtr::Text_status::OK,
+        "the unprepared frame's run must queue");
+
+    cb->beginPass(
+        unprepared.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, unprepared.resource_updates);
+    ok &= check_status(
+        renderer.record(unprepared),
+        mtr::Text_status::NOT_PREPARED,
+        "a frame whose text was never prepared must not record");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+
+    ok &= check(
+        renderer.diagnostics().recorded_draws == 0,
+        "an unprepared frame must issue no draws");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 1,
+        "a frame that did not prepare must not offer the atlas itself");
+
+    // The abandoned upload is still owed, so the next preparation must enqueue
+    // it again instead of finding it committed by the frame above.
+    mtr::text_result_t prepared{};
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the frame after the unprepared one must record");
+    ok &= check_status(
+        prepared, mtr::Text_status::OK, "the frame after the unprepared one prepares");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 2,
+        "an upload no recorded frame carried must be enqueued again");
+
+    // That frame did carry its own upload into the pass it recorded in, so the
+    // upload is settled and the frame after it draws the atlas as it stands.
+    ok &= check_status(
+        run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+        mtr::Text_status::OK,
+        "the following frame must record");
+    ok &= check(
+        renderer.diagnostics().atlas_upload_enqueues == 2,
+        "a settled upload must not be offered again");
+
+    renderer.release_resources();
+    return ok;
+}
+
 bool test_null_rejects_unusable_clip_rectangles()
 {
     std::unique_ptr<QRhi> rhi = make_null_rhi();
@@ -1677,6 +1797,7 @@ int main(int argc, char** argv)
     ok &= run_test("null multiple draw states record separately", test_null_multiple_draw_states_record_separately);
     ok &= run_test("null font replacement does not move a queued frame", test_null_font_replacement_does_not_move_a_queued_frame);
     ok &= run_test("null cancelled update batch is uploaded again", test_null_cancelled_update_batch_is_uploaded_again);
+    ok &= run_test("null unprepared record does not settle an abandoned upload", test_null_unprepared_record_does_not_settle_an_abandoned_upload);
     ok &= run_test("null rejects unusable clip rectangles", test_null_rejects_unusable_clip_rectangles);
     ok &= run_test("null geometry growth keeps the pipeline", test_null_geometry_growth_keeps_the_pipeline);
     ok &= run_test("null queue survives allocation failure", test_null_queue_survives_allocation_failure);
