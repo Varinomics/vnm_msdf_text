@@ -15,6 +15,14 @@ It uses FreeType and msdfgen. When configured as the top-level project, CMake
 fetches those dependencies when compatible targets are not already available.
 Parent projects should set `VNM_MSDF_TEXT_FETCH_DEPS` explicitly.
 
+An opt-in Qt QRhi text component builds alongside it when a consumer asks for
+it, adding the shared GPU text substrate described under
+[QRhi text component](#qrhi-text-component):
+
+```cmake
+vnm_msdf_text::rhi
+```
+
 The package also exports dependency-light LCD/MSDF support targets:
 
 ```cmake
@@ -168,6 +176,109 @@ layout stream used by `measure_text_advance_px`, `measure_text_bounds_px`, and
 output would exceed `uint32_t` capacity; vector growth may throw allocation
 exceptions.
 
+## QRhi text component
+
+`vnm_msdf_text::rhi` is the shared GPU substrate that draws the atlas above with
+Qt's QRhi. It is a compositional layer over the CPU API: it owns device-local
+texture, buffer, sampler, pipeline, and binding resources, the per-frame upload
+and recording, and the status of both. Where text goes, what it says, how it is
+coloured, and when it is worth drawing stay with the consumer.
+
+The component is off by default. Configure with `-DVNM_MSDF_TEXT_BUILD_RHI=ON`
+to build it; Qt is located only when that option is on, so a CPU-only or
+editor-style consumer neither finds nor links Qt through this project. A
+consumer that requires GPU text can read the `VNM_MSDF_TEXT_HAS_RHI` cache
+entry and fail its own configure instead of linking a build without it. The
+component requires C++20, Qt 6.7 or newer, and Qt Shader Tools at build time
+only. It is a source-tree target consumed through `add_subdirectory` or
+`FetchContent`; it is not part of the installed package export.
+
+Public headers live under `vnm_msdf_text/rhi/` and everything is in namespace
+`vnm::msdf_text::rhi`. The public headers only forward-declare the QRhi types
+they take pointers to, so Qt's private QRhi headers stay inside the
+implementation.
+
+### Font snapshots
+
+`build_font_snapshot(font_bytes, draw_pixel_height, codepoints, options)` builds
+an immutable `Font_snapshot` from caller-supplied bytes. The component never
+reads a file or resolves an asset: font acquisition belongs to the consumer.
+
+The result carries a status and, on success, a `shared_ptr` to the snapshot:
+
+- `INVALID_ARGUMENT` for empty bytes or a non-positive draw pixel height.
+- `FONT_BUILD_FAILED` when no usable atlas could be produced; no snapshot.
+- `OK` otherwise. A partially built atlas is an `OK` result with a usable
+  snapshot whose `build_result().status` is `PARTIAL_SUCCESS` and whose
+  diagnostic vectors name the codepoints that were not emitted.
+
+A snapshot exposes the CPU data it was built from rather than restating it:
+`atlas()`, `draw_pixel_height()`, and the full `build_result()`. Measurement,
+bounds, positioned glyphs, and quad emission are the existing free functions in
+`msdf_text.h` applied to those two values, so there is one set of metrics.
+
+`identity()` is a digest of every input that determines the bake: the font
+bytes, the draw pixel height, the atlas options, and the requested codepoints.
+Two snapshots with equal identity measure identically and emit identical quads,
+so a consumer can key cached CPU measurements or a presentation key on it and
+keep them across a rebuild. `revision()` distinguishes snapshot instances that
+share an identity; a renderer keys its GPU atlas upload on the revision.
+
+### Batches and draw states
+
+A `Text_batch` holds quads and the identity of the font they were laid out
+against. `append_run(font, text, baseline_x, baseline_y)` emits them through
+`append_text_quads`, so a batch always agrees with the measurement helpers;
+`append_quads(font, vertices, indices)` accepts geometry a consumer produced
+itself and rebases the indices. A batch holds geometry from one font only, and a
+renderer rejects a batch whose font is not its own. Because a batch needs
+nothing but an immutable snapshot, CPU preparation can build one away from the
+render thread and hand it over when it is complete.
+
+A `draw_state_t` carries the column-major transform from the batch's own
+coordinates to clip space, a straight (non-premultiplied) RGBA colour, and an
+optional scissor rectangle. `pixel_ortho_transform(frame)` builds the transform
+for text laid out in top-left-origin framebuffer pixels, including the backend's
+clip-space correction.
+
+### Frames
+
+`Text_renderer` belongs to one renderer, one window, and one QRhi device, and
+lives on the thread that drives that device's frames. There is no process-global
+or cross-device QRhi object: two renderers own two independent resource sets
+even when they draw the same snapshot. QRhi requires its resources to be
+destroyed before the device, so the owner calls `release_resources()` on the
+render thread while the device is still alive.
+
+A frame is:
+
+1. `begin_frame()`.
+2. `queue(batch, state)` once per draw state. Batches accumulate into one vertex
+   and one index buffer, so the draw count follows the number of draw states,
+   not the number of glyphs.
+3. `prepare(frame)` before the host opens its render pass, because the atlas,
+   geometry, and uniform uploads go through the frame's resource-update batch.
+4. `record(frame)` inside the pass.
+
+Every step returns a `text_result_t`. `record()` reports `NOT_PREPARED` when
+text was queued but preparation did not run or did not succeed, so a frame can
+never present as text-complete when its text was dropped; `diagnostics()`
+reports what the call actually issued. The renderer sets a scissor for every
+draw and leaves the viewport as the host set it.
+
+The resource set is rebuilt when the QRhi changes, the pipeline when the
+render-pass descriptor or sample count changes, and the atlas is uploaded again
+when the snapshot revision changes, even if the queued text did not change.
+`diagnostics()` exposes those causes as counters.
+
+### Shaders
+
+The component bakes its own `.qsb` artifacts covering SPIR-V, OpenGL ES 3.0,
+desktop GL 3.3 and 4.1, HLSL 5.0, and Metal 1.2 and 2.1. The fragment stage
+reconstructs coverage from the MTSDF median as shown above, clamps sampling
+inside each glyph's UV rectangle, and writes premultiplied colour; the pipeline
+blends `One` against `OneMinusSrcAlpha`.
+
 ## Building
 
 ```bash
@@ -199,3 +310,12 @@ ctest --test-dir build --output-on-failure
 ```
 
 Set `-DVNM_MSDF_TEXT_BUILD_TESTS=OFF` to skip the test executable.
+
+A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` adds two more tests.
+`vnm_msdf_text_rhi_tests` covers the snapshot, batch, and frame contracts and
+drives the Null QRhi backend, which proves resource lifecycle and command
+recording. `vnm_msdf_text_rhi_real_backend_tests` renders text with a real
+backend and inspects the rasterized result; it needs a working graphics device
+and is never a substitute for the Null suite. Pass `--backend`, `--image`, and
+`--window` to select the backend, save the rendered image, and additionally
+record frames against a shown window.

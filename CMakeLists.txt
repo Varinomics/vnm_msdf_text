@@ -28,6 +28,9 @@ option(VNM_MSDF_TEXT_FETCH_DEPS
 option(VNM_MSDF_TEXT_BUILD_TESTS
   "Build vnm_msdf_text tests"
   ${VNM_MSDF_TEXT_IS_TOP_LEVEL})
+option(VNM_MSDF_TEXT_BUILD_RHI
+  "Build the opt-in Qt QRhi text component (vnm_msdf_text::rhi)"
+  OFF)
 
 include(FetchContent)
 
@@ -283,6 +286,86 @@ foreach(_dep IN ITEMS Freetype::Freetype msdfgen::msdfgen-core msdfgen::msdfgen-
 endforeach()
 set(VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT ${_vnm_msdf_text_export_ok})
 
+# -----------------------------------------------------------------------------
+# Opt-in QRhi text component
+#
+# Qt is located only inside this block. A CPU-only or editor-style consumer that
+# leaves VNM_MSDF_TEXT_BUILD_RHI OFF never runs find_package(Qt6), so it can
+# neither find nor link Qt through this project. The component is a source-tree
+# target: it is deliberately not part of the installed package export, because
+# an exported static library carrying Qt private headers and Qt resource objects
+# would promise an installed-consumer contract no consumer has adopted yet.
+# -----------------------------------------------------------------------------
+if(VNM_MSDF_TEXT_BUILD_RHI)
+  find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui GuiPrivate ShaderTools)
+
+  add_library(vnm_msdf_text_rhi STATIC
+    src/rhi/font_snapshot.cpp
+    src/rhi/text_batch.cpp
+    src/rhi/text_renderer.cpp
+    src/rhi/sha256.h
+    include/vnm_msdf_text/rhi/font_snapshot.h
+    include/vnm_msdf_text/rhi/status.h
+    include/vnm_msdf_text/rhi/text_batch.h
+    include/vnm_msdf_text/rhi/text_renderer.h
+  )
+
+  add_library(vnm_msdf_text::rhi ALIAS vnm_msdf_text_rhi)
+
+  set_target_properties(vnm_msdf_text_rhi PROPERTIES
+    EXPORT_NAME rhi
+    POSITION_INDEPENDENT_CODE ON
+  )
+
+  target_include_directories(vnm_msdf_text_rhi
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_compile_features(vnm_msdf_text_rhi PUBLIC cxx_std_20)
+
+  # Qt private QRhi headers stay private to this implementation: the public
+  # headers only forward-declare the QRhi types they take pointers to.
+  target_link_libraries(vnm_msdf_text_rhi
+    PUBLIC
+      vnm_msdf_text
+      Qt6::Core
+      Qt6::Gui
+    PRIVATE
+      Qt6::GuiPrivate
+  )
+
+  if(MSVC)
+    target_compile_options(vnm_msdf_text_rhi PRIVATE /W4)
+  else()
+    target_compile_options(vnm_msdf_text_rhi PRIVATE -Wall -Wextra)
+  endif()
+
+  # One .qsb artifact per stage, covering the backend profiles the Varinomics
+  # QRhi consumers support: SPIR-V (always emitted), OpenGL ES 3.0, desktop
+  # GL 3.3 and 4.1, HLSL 5.0, and Metal 1.2 and 2.1. ShaderTools is used here
+  # only at build time; the component links no ShaderTools library.
+  qt_add_shaders(vnm_msdf_text_rhi "vnm_msdf_text_rhi_shaders"
+    PREFIX "/vnm_msdf_text"
+    BASE   "${CMAKE_CURRENT_SOURCE_DIR}"
+    GLSL   "300 es,330,410"
+    HLSL   "50"
+    MSL    "12,21"
+    FILES
+      shaders/rhi/msdf_text.vert
+      shaders/rhi/msdf_text.frag
+  )
+endif()
+
+# Configure-time capability signal, so an add_subdirectory or FetchContent
+# consumer that requires real QRhi text can fail its own configure instead of
+# linking a build that does not have the component. Forced on every reconfigure
+# so it can never describe a capability this build tree does not have.
+set(VNM_MSDF_TEXT_HAS_RHI ${VNM_MSDF_TEXT_BUILD_RHI}
+  CACHE INTERNAL "Whether this vnm_msdf_text build provides the QRhi text component" FORCE)
+
 if(VNM_MSDF_TEXT_BUILD_TESTS)
   enable_testing()
 
@@ -324,6 +407,98 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
   add_test(
     NAME vnm_msdf_text_lcd_contract_tests
     COMMAND vnm_msdf_text_lcd_contract_tests)
+
+  if(VNM_MSDF_TEXT_BUILD_RHI)
+    add_executable(vnm_msdf_text_rhi_tests
+      tests/rhi_text_tests.cpp
+    )
+    target_link_libraries(vnm_msdf_text_rhi_tests
+      PRIVATE
+        vnm_msdf_text_rhi
+        Qt6::GuiPrivate
+    )
+    target_include_directories(vnm_msdf_text_rhi_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_features(vnm_msdf_text_rhi_tests PRIVATE cxx_std_20)
+    target_compile_definitions(vnm_msdf_text_rhi_tests PRIVATE
+      VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
+    )
+
+    if(MSVC)
+      target_compile_options(vnm_msdf_text_rhi_tests PRIVATE /W4)
+    else()
+      target_compile_options(vnm_msdf_text_rhi_tests PRIVATE -Wall -Wextra)
+    endif()
+
+    add_test(NAME vnm_msdf_text_rhi_tests COMMAND vnm_msdf_text_rhi_tests)
+
+    # On Windows the first Qt of the right major version on PATH wins, and an
+    # unrelated application's bundled Qt loads into these tests and crashes
+    # them. Put the Qt this build linked against in front for the test run.
+    if(WIN32)
+      get_target_property(_vnm_msdf_text_qt_core_dll Qt6::Core IMPORTED_LOCATION_RELEASE)
+      if(NOT _vnm_msdf_text_qt_core_dll)
+        get_target_property(_vnm_msdf_text_qt_core_dll Qt6::Core IMPORTED_LOCATION)
+      endif()
+      if(_vnm_msdf_text_qt_core_dll)
+        get_filename_component(_vnm_msdf_text_qt_bin_dir
+          "${_vnm_msdf_text_qt_core_dll}" DIRECTORY)
+        file(TO_NATIVE_PATH "${_vnm_msdf_text_qt_bin_dir}" _vnm_msdf_text_qt_bin_native)
+        set(_vnm_msdf_text_qt_path_env
+          "PATH=path_list_prepend:${_vnm_msdf_text_qt_bin_native}")
+      else()
+        message(WARNING
+          "vnm_msdf_text: the Qt 6 runtime directory could not be derived from "
+          "Qt6::Core, so the QRhi tests run against whichever Qt is on PATH.")
+      endif()
+    endif()
+
+    if(_vnm_msdf_text_qt_path_env)
+      set_tests_properties(vnm_msdf_text_rhi_tests PROPERTIES
+        ENVIRONMENT_MODIFICATION "${_vnm_msdf_text_qt_path_env}")
+    endif()
+
+    # The real-backend gate needs a working graphics device, so it is registered
+    # separately from the Null-backend suite and is never a substitute for it.
+    add_executable(vnm_msdf_text_rhi_real_backend_tests
+      tests/rhi_real_backend_tests.cpp
+    )
+    target_link_libraries(vnm_msdf_text_rhi_real_backend_tests
+      PRIVATE
+        vnm_msdf_text_rhi
+        Qt6::GuiPrivate
+    )
+    target_compile_features(vnm_msdf_text_rhi_real_backend_tests PRIVATE cxx_std_20)
+    target_compile_definitions(vnm_msdf_text_rhi_real_backend_tests PRIVATE
+      VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
+    )
+
+    if(MSVC)
+      target_compile_options(vnm_msdf_text_rhi_real_backend_tests PRIVATE /W4)
+    else()
+      target_compile_options(vnm_msdf_text_rhi_real_backend_tests PRIVATE -Wall -Wextra)
+    endif()
+
+    if(WIN32)
+      add_test(
+        NAME vnm_msdf_text_rhi_real_backend_tests
+        COMMAND vnm_msdf_text_rhi_real_backend_tests
+          --backend d3d11
+          --image "${CMAKE_CURRENT_BINARY_DIR}/vnm_msdf_text_rhi_real_backend.png")
+
+      if(_vnm_msdf_text_qt_path_env)
+        set_tests_properties(vnm_msdf_text_rhi_real_backend_tests PROPERTIES
+          ENVIRONMENT_MODIFICATION "${_vnm_msdf_text_qt_path_env}")
+      endif()
+    endif()
+
+    unset(_vnm_msdf_text_qt_bin_dir)
+    unset(_vnm_msdf_text_qt_bin_native)
+    unset(_vnm_msdf_text_qt_core_dll)
+    unset(_vnm_msdf_text_qt_path_env)
+  endif()
 
   if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
     add_test(
