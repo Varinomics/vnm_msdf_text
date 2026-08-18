@@ -35,6 +35,9 @@ option(VNM_MSDF_TEXT_BUILD_TESTS
 option(VNM_MSDF_TEXT_BUILD_RHI
   "Build the opt-in Qt QRhi text component (vnm_msdf_text::rhi)"
   OFF)
+option(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN
+  "Compile the fetched msdfgen distance-field kernel optimized in every configuration"
+  ON)
 
 include(FetchContent)
 
@@ -79,6 +82,38 @@ if(DEFINED VNM_MSDF_TEXT_USE_SYSTEM_LIBS)
     "VNM_MSDF_TEXT_FETCH_DEPS=OFF to require existing/find_package "
     "dependencies, or VNM_MSDF_TEXT_FETCH_DEPS=ON to allow FetchContent.")
 endif()
+
+# Baking one glyph inventory is a per-pixel scan of every glyph contour, and an
+# unoptimized msdfgen runs it about an order of magnitude slower than an
+# optimized one. The bake is synchronous for its caller, so that difference is
+# paid as a stall by whichever thread asked for the atlas. Nothing here debugs
+# msdfgen's numerics, so its subtree is compiled optimized in every
+# configuration; the flags only change how the arithmetic is scheduled, so the
+# baked atlas bytes are the same either way.
+#
+# The pair is scope-based rather than target-based because MSVC rejects /RTC
+# together with /O2 outright, so the runtime checks have to be gone before the
+# subdirectory declares its targets.
+macro(vnm_msdf_text_begin_optimized_dependency_scope)
+  set(_vnm_msdf_text_saved_cxx_flags_debug "${CMAKE_CXX_FLAGS_DEBUG}")
+  set(_vnm_msdf_text_saved_c_flags_debug   "${CMAKE_C_FLAGS_DEBUG}")
+  if(MSVC)
+    foreach(_vnm_msdf_text_flags CMAKE_CXX_FLAGS_DEBUG CMAKE_C_FLAGS_DEBUG)
+      string(REGEX REPLACE "/(RTC[1csu]+|Od|Ob0)( |$)" "" "${_vnm_msdf_text_flags}"
+        "${${_vnm_msdf_text_flags}}")
+      string(APPEND "${_vnm_msdf_text_flags}" " /O2 /Ob2")
+    endforeach()
+    unset(_vnm_msdf_text_flags)
+  else()
+    string(APPEND CMAKE_CXX_FLAGS_DEBUG " -O2")
+    string(APPEND CMAKE_C_FLAGS_DEBUG   " -O2")
+  endif()
+endmacro()
+
+macro(vnm_msdf_text_end_optimized_dependency_scope)
+  set(CMAKE_CXX_FLAGS_DEBUG "${_vnm_msdf_text_saved_cxx_flags_debug}")
+  set(CMAKE_C_FLAGS_DEBUG   "${_vnm_msdf_text_saved_c_flags_debug}")
+endmacro()
 
 function(vnm_msdf_text_set_fetchcontent_build_dir name dir_name)
   string(TOLOWER "${CMAKE_CXX_COMPILER_ID}" _fc_compiler_tag)
@@ -219,7 +254,13 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   if(MSVC)
     set(MSDFGEN_DYNAMIC_RUNTIME ON CACHE BOOL "")
   endif()
+  if(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN)
+    vnm_msdf_text_begin_optimized_dependency_scope()
+  endif()
   FetchContent_MakeAvailable(msdfgen)
+  if(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN)
+    vnm_msdf_text_end_optimized_dependency_scope()
+  endif()
   vnm_msdf_text_alias_msdfgen_targets()
 
   if(NOT TARGET msdfgen::msdfgen-core OR NOT TARGET msdfgen::msdfgen-ext)
