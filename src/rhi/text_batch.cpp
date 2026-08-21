@@ -68,6 +68,25 @@ constexpr std::size_t k_quad_vertices = 4u;
     return true;
 }
 
+/// The caller has already established whole, in-range triangles before this runs.
+[[nodiscard]] bool glyph_frame_triangles_stay_within_quads(
+    std::span<const std::uint32_t> indices)
+{
+    for (std::size_t triangle = 0; triangle < indices.size(); triangle += 3u) {
+        const std::uint32_t glyph_group =
+            indices[triangle] / static_cast<std::uint32_t>(k_quad_vertices);
+        if (indices[triangle + 1u] / static_cast<std::uint32_t>(k_quad_vertices) !=
+                glyph_group ||
+            indices[triangle + 2u] / static_cast<std::uint32_t>(k_quad_vertices) !=
+                glyph_group)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 text_result_t Text_batch::validate_font(const Font_snapshot& font) const
@@ -224,6 +243,11 @@ text_result_t Text_batch::append_quads(
         return detail::make_text_result(
             Text_status::INVALID_ARGUMENT,
             "glyph frames must be finite positive per-quad bounds matching their vertices");
+    }
+    if (m_glyph_frames_enabled && !glyph_frame_triangles_stay_within_quads(indices)) {
+        return detail::make_text_result(
+            Text_status::INVALID_ARGUMENT,
+            "a framed glyph triangle must stay inside one four-vertex group");
     }
 
     const text_result_t accepted = validate_font(font);

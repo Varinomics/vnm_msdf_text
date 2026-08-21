@@ -348,8 +348,9 @@ A frame is:
 
 1. `begin_frame()`.
 2. `queue(batch, state)` once per draw state. Batches accumulate into one vertex
-   and one index buffer, so the draw count follows the number of draw states,
-   not the number of glyphs.
+   and one index buffer per active base or styled path. Each ordinary draw state
+   produces one draw call, while a glow-enabled styled state produces two, so
+   draw count follows draw states rather than glyphs.
 3. `prepare(frame)` before the host opens its render pass, because the atlas,
    geometry, and uniform uploads go into the frame's resource-update batch.
 4. `record(frame)` inside the pass the host opened with that batch.

@@ -80,14 +80,18 @@ public:
      *
      * Indices are relative to the supplied vertices and are rebased onto the
      * batch. One frame rectangle per vertex is required exactly when the batch
-     * has frame rectangles enabled, and the four vertices of a quad are
-     * must form four-vertex groups, and every group must carry one finite,
-     * positive rectangle equal to that group's axis-aligned vertex bound.
+     * has frame rectangles enabled. In that mode, vertices must form
+     * four-vertex groups, every group carrying one finite, positive rectangle
+     * equal to that group's axis-aligned vertex bound. Every indexed triangle
+     * must stay within one group, so its interpolated frame always belongs to
+     * one glyph. Geometry without frame rectangles retains its general index
+     * topology.
      *
      * Fails with INVALID_ARGUMENT when the batch already holds geometry from a
      * different font, when the indices do not form whole triangles, when an
-     * index addresses a vertex that was not supplied, or when the frame
-     * rectangles do not match the batch's capability and vertex count; with
+     * index addresses a vertex that was not supplied, when a framed triangle
+     * crosses frame groups, or when the frame rectangles do not match the
+     * batch's capability and vertex count; with
      * GEOMETRY_LIMIT_EXCEEDED past the addressable index range; and with
      * OUT_OF_MEMORY when the geometry could not be allocated. A failed append
      * leaves the batch exactly as it was, including its font identity.

@@ -1886,7 +1886,11 @@ bool test_batch_glyph_frames_bound_their_own_quads()
 
 bool test_batch_quads_and_frames_must_agree()
 {
-    const mtr::Font_snapshot& font = shared_snapshot();
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(held.snapshot != nullptr, "the topology test snapshot must build")) {
+        return false;
+    }
+    const mtr::Font_snapshot& font = *held.snapshot;
 
     mtr::Text_batch source;
     bool ok = build_sample_batch(font, true, source);
@@ -1963,6 +1967,102 @@ bool test_batch_quads_and_frames_must_agree()
         framed.glyph_frames().size() == framed.vertices().size(),
         "the appended rectangles must stay parallel to the vertices");
 
+    const std::vector<msdf::text_vertex_t> two_glyph_vertices = {
+        { 0.0f,  0.0f, 0.0f, 0.0f },
+        { 8.0f,  0.0f, 1.0f, 0.0f },
+        { 8.0f, 10.0f, 1.0f, 1.0f },
+        { 0.0f, 10.0f, 0.0f, 1.0f },
+        {16.0f,  0.0f, 0.0f, 0.0f },
+        {24.0f,  0.0f, 1.0f, 0.0f },
+        {24.0f, 10.0f, 1.0f, 1.0f },
+        {16.0f, 10.0f, 0.0f, 1.0f },
+    };
+    const std::vector<std::uint32_t> two_glyph_indices = {
+        0u, 1u, 2u, 0u, 2u, 3u,
+        4u, 5u, 6u, 4u, 6u, 7u,
+    };
+    const std::vector<mtr::glyph_frame_t> two_glyph_frames = {
+        { 0.0f, 0.0f, 8.0f, 10.0f }, { 0.0f, 0.0f, 8.0f, 10.0f },
+        { 0.0f, 0.0f, 8.0f, 10.0f }, { 0.0f, 0.0f, 8.0f, 10.0f },
+        {16.0f, 0.0f, 8.0f, 10.0f }, {16.0f, 0.0f, 8.0f, 10.0f },
+        {16.0f, 0.0f, 8.0f, 10.0f }, {16.0f, 0.0f, 8.0f, 10.0f },
+    };
+    const std::array<std::uint32_t, 3> cross_group_triangle = { 0u, 1u, 6u };
+    const std::array<std::uint32_t, 3> out_of_range_triangle = { 0u, 1u, 8u };
+
+    mtr::Text_batch topology;
+    ok &= check_status(
+        topology.enable_glyph_frames(),
+        mtr::Text_status::OK,
+        "the topology batch must enable frames");
+    ok &= check_status(
+        topology.append_quads(font, two_glyph_vertices, two_glyph_indices, two_glyph_frames),
+        mtr::Text_status::OK,
+        "a framed batch with valid multi-glyph triangles must append");
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(topology, mtr::draw_state_t{}),
+        mtr::Text_status::OK,
+        "a valid framed multi-glyph batch must queue");
+    const mtr::renderer_diagnostics_t queued_before_topology_failure = renderer.diagnostics();
+
+    const std::vector<msdf::text_vertex_t> before_topology_vertices(
+        topology.vertices().begin(), topology.vertices().end());
+    const std::vector<std::uint32_t> before_topology_indices(
+        topology.indices().begin(), topology.indices().end());
+    const std::vector<mtr::glyph_frame_t> before_topology_frames(
+        topology.glyph_frames().begin(), topology.glyph_frames().end());
+    const std::optional<mtr::font_identity_t> before_topology_font = topology.font_identity();
+
+    const auto batch_stays_unchanged = [&]() {
+        return
+            topology.vertices().size() == before_topology_vertices.size() &&
+            std::memcmp(
+                topology.vertices().data(),
+                before_topology_vertices.data(),
+                before_topology_vertices.size() * sizeof(msdf::text_vertex_t)) == 0 &&
+            topology.indices().size() == before_topology_indices.size() &&
+            std::equal(
+                topology.indices().begin(), topology.indices().end(), before_topology_indices.begin()) &&
+            topology.glyph_frames().size() == before_topology_frames.size() &&
+            std::memcmp(
+                topology.glyph_frames().data(),
+                before_topology_frames.data(),
+                before_topology_frames.size() * sizeof(mtr::glyph_frame_t)) == 0 &&
+            topology.font_identity() == before_topology_font;
+    };
+
+    ok &= check_status(
+        topology.append_quads(font, two_glyph_vertices, out_of_range_triangle, two_glyph_frames),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a framed triangle must check its index bounds before its glyph group");
+    ok &= check(batch_stays_unchanged(), "an out-of-range framed triangle must not mutate a batch");
+    ok &= check_status(
+        topology.append_quads(font, two_glyph_vertices, cross_group_triangle, two_glyph_frames),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a framed triangle must not cross glyph-frame groups");
+    ok &= check(
+        batch_stays_unchanged(),
+        "a cross-group framed triangle must leave vertices, indices, frames, and font unchanged");
+    const mtr::renderer_diagnostics_t queued_after_topology_failure = renderer.diagnostics();
+    ok &= check(
+        queued_after_topology_failure.queued_draws == queued_before_topology_failure.queued_draws &&
+            queued_after_topology_failure.queued_indices == queued_before_topology_failure.queued_indices &&
+            queued_after_topology_failure.recorded_draws == queued_before_topology_failure.recorded_draws,
+        "a rejected framed topology must not alter an already queued renderer frame");
+    ok &= check_status(
+        topology.append_quads(font, two_glyph_vertices, two_glyph_indices, two_glyph_frames),
+        mtr::Text_status::OK,
+        "a correct framed retry after a rejected topology must append");
+    ok &= check(
+        topology.vertices().size() == before_topology_vertices.size() * 2u &&
+            topology.indices().size() == before_topology_indices.size() * 2u &&
+            topology.glyph_frames().size() == before_topology_frames.size() * 2u,
+        "a successful framed retry must extend every parallel batch stream");
+
     mtr::Text_batch plain;
     ok &= check_status(
         plain.append_quads(font, vertices, indices, frames),
@@ -1973,6 +2073,14 @@ bool test_batch_quads_and_frames_must_agree()
         plain.append_quads(font, vertices, indices),
         mtr::Text_status::OK,
         "the same quads without rectangles must append");
+
+    mtr::Text_batch plain_cross_group;
+    ok &= check_status(
+        plain_cross_group.append_quads(font, two_glyph_vertices, cross_group_triangle),
+        mtr::Text_status::OK,
+        "base geometry without glyph frames must retain its general triangle topology");
+
+    renderer.reset_frame();
 
     return ok;
 }
