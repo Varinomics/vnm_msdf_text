@@ -348,6 +348,7 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
     src/rhi/font_snapshot.cpp
     src/rhi/text_batch.cpp
     src/rhi/text_renderer.cpp
+    include/vnm_msdf_text/rhi/draw_capabilities.h
     include/vnm_msdf_text/rhi/font_snapshot.h
     include/vnm_msdf_text/rhi/status.h
     include/vnm_msdf_text/rhi/text_batch.h
@@ -370,9 +371,15 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
 
   # Qt private QRhi headers stay private to this implementation: the public
   # headers only forward-declare the QRhi types they take pointers to.
+  # The optional LCD draw capability is stated in terms of the shared contract
+  # and its shader reference, and draw_capabilities.h includes both, so they are
+  # part of what a consumer of this component gets. Both are header-only and
+  # Qt-free, so naming them here adds no dependency a consumer did not have.
   target_link_libraries(vnm_msdf_text_rhi
     PUBLIC
       vnm_msdf_text
+      vnm_msdf_text_lcd_contract
+      vnm_msdf_text_lcd_shader_reference
       Qt6::Core
       Qt6::Gui
     PRIVATE
@@ -398,6 +405,8 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
     FILES
       shaders/rhi/msdf_text.vert
       shaders/rhi/msdf_text.frag
+      shaders/rhi/msdf_text_styled.vert
+      shaders/rhi/msdf_text_styled.frag
   )
 endif()
 
@@ -451,6 +460,31 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
     COMMAND vnm_msdf_text_lcd_contract_tests)
 
   if(VNM_MSDF_TEXT_BUILD_RHI)
+    # A text check on the styled shader source against the shared LCD reference.
+    # It needs neither Qt nor a device, so it is registered on its own and stays
+    # runnable wherever the reference component is.
+    add_executable(vnm_msdf_text_rhi_styled_shader_reference_tests
+      tests/rhi_styled_shader_reference_tests.cpp
+    )
+    target_link_libraries(vnm_msdf_text_rhi_styled_shader_reference_tests
+      PRIVATE
+        vnm_msdf_text_lcd_shader_reference
+    )
+    target_compile_features(vnm_msdf_text_rhi_styled_shader_reference_tests PRIVATE cxx_std_17)
+    target_compile_definitions(vnm_msdf_text_rhi_styled_shader_reference_tests PRIVATE
+      VNM_MSDF_TEXT_STYLED_FRAG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shaders/rhi/msdf_text_styled.frag"
+    )
+
+    if(MSVC)
+      target_compile_options(vnm_msdf_text_rhi_styled_shader_reference_tests PRIVATE /W4)
+    else()
+      target_compile_options(vnm_msdf_text_rhi_styled_shader_reference_tests PRIVATE -Wall -Wextra)
+    endif()
+
+    add_test(
+      NAME vnm_msdf_text_rhi_styled_shader_reference_tests
+      COMMAND vnm_msdf_text_rhi_styled_shader_reference_tests)
+
     add_executable(vnm_msdf_text_rhi_tests
       tests/rhi_text_tests.cpp
     )

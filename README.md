@@ -250,10 +250,11 @@ nothing but an immutable snapshot, CPU preparation can build one away from the
 render thread and hand it over when it is complete.
 
 A `draw_state_t` carries the column-major transform from the batch's own
-coordinates to clip space, a straight (non-premultiplied) RGBA colour, and an
-optional scissor rectangle. `pixel_ortho_transform(frame)` builds the transform
-for text laid out in top-left-origin framebuffer pixels, including the backend's
-clip-space correction.
+coordinates to clip space, a straight (non-premultiplied) RGBA colour, an
+optional scissor rectangle, and the optional draw capabilities below.
+`pixel_ortho_transform(frame)` builds the transform for text laid out in
+top-left-origin framebuffer pixels, including the backend's clip-space
+correction.
 
 `clip_rect_t` is in framebuffer pixels with `x`, `y` at the bottom-left corner.
 QRhi takes OpenGL-style scissor coordinates on every backend and itself flips
@@ -267,6 +268,72 @@ A negative width or height is not a rectangle QRhi can express -
 it drops such a scissor and leaves the previous one in force - so `queue()`
 rejects an enabled clip with one instead of recording a draw under someone
 else's clip.
+
+### Optional draw capabilities
+
+`draw_capabilities.h` adds four optional capabilities. Each is a presence-tagged
+record with a version of its own, and each is absent by default. A draw state
+that carries none of them takes the base path described above: the same
+geometry, uniform block, shader, and pipeline a build without that header uses.
+A draw state that carries any of them is a *styled* draw and takes a second
+path, created only once a frame queues one.
+
+| Capability | Record | What it does |
+| --- | --- | --- |
+| Per-glyph frame rectangles | `glyph_frames_t` on `Text_batch` | Records each quad's rectangle so the fragment stage can measure in output pixels |
+| LCD subpixel order | `lcd_style_t` on `draw_state_t` | Filters coverage per channel and composes it against an opaque background |
+| Outer glow | `glow_style_t` on `draw_state_t` | Ramps coverage outwards from the glyph outline |
+| True-SDF alpha masking | `sdf_mask_t` on `draw_state_t` | Takes the smaller of the multi-channel and true-SDF coverages |
+
+The provider supplies rendering semantics only. Which text gets a subpixel
+order, a glow, or a mask, what background it sits on, and when any of that is
+worth doing stay with the consumer.
+
+A styled draw is laid out in framebuffer pixels under
+`pixel_ortho_transform(frame)`, and its batch carries frame rectangles:
+`enable_glyph_frames()` on an empty batch, after which `append_run()` derives
+each quad's rectangle itself and `append_quads()` takes one rectangle per
+vertex. Caller-supplied frames must be finite, positive, identical across each
+four-vertex quad, and equal that quad's axis-aligned bound. `prepare()` rejects
+a styled transform other than `pixel_ortho_transform(frame)` before it changes
+resources or enqueues updates. The fragment stage reconstructs where a fragment
+sits inside its glyph from that rectangle, which is what lets a subpixel filter
+step by a third of an output pixel.
+
+`lcd_style_t::order` is the existing `vnm_msdf_text::lcd_contract` resolution and
+the filter is the one `vnm_msdf_text::lcd_shader_reference` describes: three
+five-tap windows a third of a pixel apart, along X for `RGB` and `BGR` and along
+Y for `VRGB` and `VBGR`, in reverse channel order for `BGR` and `VBGR`. A
+display-specific order composes each channel's coverage against
+`background_color` and writes the straight colour that reproduces that mix once
+the pipeline has blended it, so it is only the intended image where the
+destination really is that background. `queue()` therefore rejects a
+display-specific order unless the draw colour and the background are both opaque
+within `lcd::shader_reference::k_lcd_opaque_alpha_cutoff` and no glow is present.
+`NONE` is a valid order meaning no subpixel filtering: it composes exactly as the
+base path does, and none of those conditions applies to it.
+
+`glow_style_t` ramps coverage outwards from the glyph outline over `radius_px`
+output pixels and is drawn under the glyphs of that same draw, so a later
+glyph's glow never darkens an earlier glyph's body - which is why a glowing draw
+records two draw calls. Draw states themselves stay in the order they were
+queued. It is drawn on the glyph quads, so its reach is the padding
+`options_t::atlas_px_range` leaves around each outline at the draw size; a
+consumer that wants a wide glow bakes a snapshot with a wider range. The glow is
+centred, so an offset drop shadow is a second displaced run.
+
+`sdf_mask_t` takes the smaller of the multi-channel coverage and the true signed
+distance in the MTSDF alpha channel, which keeps the sharp corners of the median
+while dropping what it reconstructs where its channels disagree.
+
+Absence is not a mode. A frame that queues no styled draw builds no styled
+pipeline and allocates no styled buffers, which `diagnostics()` reports through
+`styled_pipeline_builds` and the `styled_*_buffer_bytes` counters. A record
+naming a version this build does not implement is refused at that record's own
+boundary with `CAPABILITY_UNSUPPORTED`, and a record whose values or combination
+cannot describe a drawable result with `INVALID_ARGUMENT`; either way the call
+changes nothing, so the frame's other draws - base text included - record
+unchanged. Nothing is ever drawn without a capability that was asked for.
 
 ### Frames
 
@@ -323,10 +390,22 @@ presentation, or display, and it never claims to.
 ### Shaders
 
 The component bakes its own `.qsb` artifacts covering SPIR-V, OpenGL ES 3.0,
-desktop GL 3.3 and 4.1, HLSL 5.0, and Metal 1.2 and 2.1. The fragment stage
-reconstructs coverage from the MTSDF median as shown above, clamps sampling
-inside each glyph's UV rectangle, and writes premultiplied colour; the pipeline
-blends `One` against `OneMinusSrcAlpha`.
+desktop GL 3.3 and 4.1, HLSL 5.0, and Metal 1.2 and 2.1, for both the base and
+the styled stages. The base fragment stage reconstructs coverage from the MTSDF
+median as shown above, clamps sampling inside each glyph's UV rectangle, and
+writes premultiplied colour; its pipeline blends `One` against
+`OneMinusSrcAlpha`.
+
+The styled fragment stage adds the optional capabilities. It writes straight
+colour, because an LCD draw's one alpha stands for three channel coverages and
+cannot premultiply them, so its pipeline blends `SrcAlpha` against
+`OneMinusSrcAlpha` - the same `source over` composite by another route. Its LCD
+decode thresholds, filter weights, tap windows, and subpixel step are the ones
+`vnm_msdf_text::lcd_shader_reference` describes, and
+`vnm_msdf_text_rhi_styled_shader_reference_tests` reads the shader source to
+check they still are. The opacity and glow conditions that reference also states
+are enforced where the draw is queued rather than in the shader, so a caller that
+cannot have them is told rather than quietly given grayscale.
 
 ## Building
 
@@ -361,13 +440,20 @@ ctest --test-dir build --output-on-failure
 Set `-DVNM_MSDF_TEXT_BUILD_TESTS=OFF` to skip the test executable.
 
 A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` registers further tests.
-`vnm_msdf_text_rhi_tests` covers the snapshot, batch, and frame contracts and
-drives the Null QRhi backend, which proves resource lifecycle and command
-recording. `vnm_msdf_text_rhi_real_backend_tests` renders text with a real
-backend and inspects the rasterized result; it needs a working graphics device
-and is never a substitute for the Null suite. Pass `--backend`, `--image`, and
-`--window` to select the backend, save the rendered image, and additionally
-record frames against a shown window.
+`vnm_msdf_text_rhi_tests` covers the snapshot, batch, frame, and optional
+draw-capability contracts, drives the Null QRhi backend, which proves resource
+lifecycle and command recording, and checks that every compiled shader artifact
+carries all seven backend profiles.
+`vnm_msdf_text_rhi_styled_shader_reference_tests` checks the styled shader
+source against the shared LCD reference; it needs neither Qt nor a device.
+`vnm_msdf_text_rhi_real_backend_tests` renders text with a real backend and
+inspects the rasterized result, including the subpixel orders, the glow, the
+mask, and their combinations; it needs a working graphics device and is never a
+substitute for the Null suite. Pass `--backend`, `--image`, and `--window` to
+select the backend, save the rendered images, and additionally record frames
+against a shown window. The registered Windows gate uses D3D11 by default, so
+its raster proof is D3D11 evidence rather than a claim that an OpenGL backend
+was exercised.
 
 `tests/source_consumer` gates the way the component is actually consumed: it is
 a project of its own that adds this repository with `add_subdirectory`, checks

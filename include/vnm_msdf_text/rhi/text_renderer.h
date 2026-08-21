@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vnm_msdf_text/rhi/draw_capabilities.h>
 #include <vnm_msdf_text/rhi/font_snapshot.h>
 #include <vnm_msdf_text/rhi/status.h>
 #include <vnm_msdf_text/rhi/text_batch.h>
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 class QRhi;
 class QRhiCommandBuffer;
@@ -78,15 +80,28 @@ inline constexpr std::array<float, 16> k_identity_transform = {
  * laid out in framebuffer pixels, pixel_ortho_transform() below builds the
  * matching matrix for the frame's backend.
  *
- * The colour is straight (non-premultiplied) RGBA in [0, 1]; the shader
- * premultiplies it by glyph coverage and the pipeline blends premultiplied
- * source over the target.
+ * The colour is straight (non-premultiplied) RGBA in [0, 1]. The base shader
+ * premultiplies it by glyph coverage and blends premultiplied source over the
+ * target; the styled shader writes straight colour and blends with SrcAlpha.
+ *
+ * The optional records below are absent by default. A draw state that carries
+ * none of them is drawn exactly as a build without draw_capabilities.h would
+ * draw it. A draw state that carries any of them is a styled draw: its batch
+ * must carry per-glyph frame rectangles, and its coordinates must be
+ * framebuffer pixels under pixel_ortho_transform(), because the styled shader
+ * measures its filter steps in output pixels. Each record is validated at its
+ * own boundary, so a rejected styled draw leaves the rest of the frame - base
+ * text included - untouched.
  */
 struct draw_state_t
 {
     std::array<float, 16> transform = k_identity_transform;
     std::array<float, 4>  color     = {1.0f, 1.0f, 1.0f, 1.0f};
     clip_rect_t           clip;
+
+    std::optional<lcd_style_t>  lcd;
+    std::optional<glow_style_t> glow;
+    std::optional<sdf_mask_t>   sdf_mask;
 };
 
 /**
@@ -104,9 +119,16 @@ struct draw_state_t
 struct renderer_diagnostics_t
 {
     /// Increments whenever the whole device-local resource set is dropped.
-    std::uint64_t resource_generation   = 0;
-    /// Increments whenever the graphics pipeline is created.
-    std::uint64_t pipeline_builds       = 0;
+    std::uint64_t resource_generation    = 0;
+    /// Increments whenever the base-path graphics pipeline is created.
+    std::uint64_t pipeline_builds        = 0;
+    /**
+     * @brief Increments whenever the styled graphics pipeline is created.
+     *
+     * A frame that queues no optional draw capability never builds it, which is
+     * how a consumer can see that the base path really is the base path.
+     */
+    std::uint64_t styled_pipeline_builds = 0;
     /**
      * @brief Increments whenever an atlas upload is put into a frame's batch.
      *
@@ -116,16 +138,42 @@ struct renderer_diagnostics_t
      * carried an upload did not reach record().
      */
     std::uint64_t atlas_upload_enqueues = 0;
+    /**
+     * @brief Increments per geometry or uniform upload put into a frame's batch.
+     *
+     * One per non-empty buffer per prepare(), so at most three for the base
+     * path and three more once a frame also has styled draws. Like the atlas
+     * count above, it says how often an upload was offered to a frame.
+     */
+    std::uint64_t buffer_upload_enqueues = 0;
 
     std::size_t   vertex_buffer_bytes  = 0;
     std::size_t   index_buffer_bytes   = 0;
     std::size_t   uniform_buffer_bytes = 0;
 
-    /// Cleared by begin_frame(), record(), and reset_frame().
+    /// Zero until a frame queues a styled draw, and separate buffers thereafter.
+    std::size_t   styled_vertex_buffer_bytes  = 0;
+    std::size_t   styled_index_buffer_bytes   = 0;
+    std::size_t   styled_uniform_buffer_bytes = 0;
+
+    /**
+     * @brief Draw calls and index elements the frame will issue, over both paths.
+     *
+     * Cleared by begin_frame(), record(), and reset_frame(). A draw state with
+     * a glow contributes two draw calls, because the glow is drawn under the
+     * glyphs of that draw rather than composited into them.
+     */
     std::size_t   queued_draws   = 0;
     std::size_t   queued_indices = 0;
     /// Draws issued by the most recent record(); survives the frame reset.
     std::size_t   recorded_draws = 0;
+    /**
+     * @brief Pipeline bindings the most recent record() issued.
+     *
+     * One per run of consecutive draws on the same pipeline, so a frame of base
+     * text binds once and a frame that alternates paths binds once per change.
+     */
+    std::size_t   recorded_pipeline_binds = 0;
 };
 
 /**
@@ -141,6 +189,11 @@ struct renderer_diagnostics_t
  * host opens its pass, and record() inside the pass. The resource set is
  * rebuilt when the QRhi changes, and the pipeline when the render-pass
  * descriptor or sample count changes, even if the queued text did not change.
+ *
+ * Draws with no optional capability and draws with one are recorded from
+ * separate geometry, uniform, and pipeline sets, in the order they were queued.
+ * The base set is exactly what a build without draw_capabilities.h produces,
+ * and the styled set is created only once a frame queues a styled draw.
  *
  * QRhi requires its resources to be destroyed before the device is, so the
  * owner calls release_resources() on the render thread while the device is
@@ -181,9 +234,12 @@ public:
     /**
      * @brief Queue one prepared batch under one draw state.
      *
-     * Batches accumulate into one vertex and one index buffer, so the recorded
-     * draw count follows the number of queued draw states, not the number of
-     * glyphs. An empty batch is accepted and queues nothing.
+     * Batches accumulate into one vertex and one index buffer per path, so the
+     * recorded draw count follows the number of queued draw states, not the
+     * number of glyphs. An empty batch is accepted and queues nothing. A draw
+     * state carrying a glow queues two draws: the glow under that same draw's
+     * glyphs, so a later glyph's glow cannot darken an earlier glyph's body.
+     * Draw states themselves stay in the order they were queued.
      *
      * The frame's first batch with geometry fixes the font snapshot for the
      * whole frame. Every later batch must be laid out against that same
@@ -192,12 +248,26 @@ public:
      * snapshot's geometry with another's atlas.
      *
      * Fails with NO_FONT when the batch has geometry and no snapshot is set,
-     * with INVALID_ARGUMENT when the batch was laid out against a different
-     * font than the frame's or the draw state enables a clip rectangle with a
-     * negative width or height, with GEOMETRY_LIMIT_EXCEEDED when the frame's
-     * accumulated geometry would exceed one QRhi buffer or the index range, and
-     * with OUT_OF_MEMORY when the frame's geometry could not be allocated. A
-     * failed queue leaves the frame exactly as it was.
+     * with CAPABILITY_UNSUPPORTED when an optional record names a version this
+     * build does not implement, with INVALID_ARGUMENT when the batch was laid
+     * out against a different font than the frame's, when the draw state
+     * enables a clip rectangle with a negative width or height, or when an
+     * optional record's values or combination cannot describe a drawable
+     * result, with GEOMETRY_LIMIT_EXCEEDED when the frame's accumulated
+     * geometry would exceed one QRhi buffer or the index range, and with
+     * OUT_OF_MEMORY when the frame's geometry could not be allocated. A failed
+     * queue leaves the frame exactly as it was, so the draws around it record
+     * unchanged.
+     *
+     * The optional records reject these combinations. A subpixel order other
+     * than NONE needs an opaque draw colour, an opaque background colour - both
+     * measured against lcd::shader_reference::k_lcd_opaque_alpha_cutoff - and no
+     * glow, because its output is only the intended image when it lands on the
+     * background it was composed against. A glow must have a positive radius
+     * and a visible colour. Any styled draw needs a batch that carries per-glyph
+     * frame rectangles. prepare() rejects a styled transform other than
+     * pixel_ortho_transform(frame) before it changes resources or enqueues
+     * updates.
      */
     [[nodiscard]] text_result_t queue(const Text_batch& batch, const draw_state_t& state);
 

@@ -24,7 +24,11 @@ enum class Text_status
      *
      * Reached by a non-positive draw pixel height, empty font bytes, caller
      * quads that do not form whole triangles or address vertices they did not
-     * supply, and a batch whose font identity differs from the renderer's.
+     * supply, a batch whose font identity differs from the renderer's, and an
+     * optional draw capability whose values or combination cannot describe a
+     * drawable result - an invisible glow, a subpixel order asked for over a
+     * background that is not opaque, or a styled draw whose batch carries no
+     * per-glyph frame rectangles.
      */
     INVALID_ARGUMENT,
     /// The font bytes were read but no MSDF atlas could be produced from them.
@@ -41,6 +45,14 @@ enum class Text_status
     GPU_RESOURCE_FAILED,
     /// The queued geometry exceeds what one QRhi buffer or index range can address.
     GEOMETRY_LIMIT_EXCEEDED,
+    /**
+     * @brief An optional capability record names a version this build has not.
+     *
+     * Reported at the boundary of the one record that carries the unknown
+     * version, so the call that supplied it fails while everything else in the
+     * frame - including base text queued before or after it - stays valid.
+     */
+    CAPABILITY_UNSUPPORTED,
     /**
      * @brief Host memory for the call's own containers could not be obtained.
      *
@@ -64,6 +76,7 @@ enum class Text_status
         case Text_status::SHADER_UNAVAILABLE:      return "shader_unavailable";
         case Text_status::GPU_RESOURCE_FAILED:     return "gpu_resource_failed";
         case Text_status::GEOMETRY_LIMIT_EXCEEDED: return "geometry_limit_exceeded";
+        case Text_status::CAPABILITY_UNSUPPORTED:  return "capability_unsupported";
         case Text_status::OUT_OF_MEMORY:           return "out_of_memory";
         default:                                   return "unknown";
     }

@@ -1,3 +1,6 @@
+#include <vnm_msdf_text/lcd_contract.h>
+#include <vnm_msdf_text/lcd_shader_reference.h>
+#include <vnm_msdf_text/rhi/draw_capabilities.h>
 #include <vnm_msdf_text/rhi/font_snapshot.h>
 #include <vnm_msdf_text/rhi/status.h>
 #include <vnm_msdf_text/rhi/text_batch.h>
@@ -5,10 +8,12 @@
 
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
+#include <rhi/qshader.h>
 
 #include <QtCore/QByteArray>
 #include <QtCore/QByteArrayView>
 #include <QtCore/QCryptographicHash>
+#include <QtCore/QFile>
 #include <QtGui/QColor>
 #include <QtGui/QGuiApplication>
 
@@ -679,8 +684,13 @@ mtr::text_result_t run_null_frame(
     frame.render_target    = offscreen.target();
     frame.resource_updates = rhi.nextResourceUpdateBatch();
 
+    mtr::draw_state_t frame_state = state;
+    if (frame_state.lcd || frame_state.glow || frame_state.sdf_mask) {
+        frame_state.transform = mtr::pixel_ortho_transform(frame);
+    }
+
     renderer.begin_frame();
-    const mtr::text_result_t queued = renderer.queue(batch, state);
+    const mtr::text_result_t queued = renderer.queue(batch, frame_state);
     if (queued.status != mtr::Text_status::OK) {
         renderer.reset_frame();
         rhi.endOffscreenFrame();
@@ -1752,6 +1762,1172 @@ bool test_null_queue_survives_allocation_failure()
     return ok;
 }
 
+// -----------------------------------------------------------------------------
+// Optional draw capabilities
+// -----------------------------------------------------------------------------
+
+constexpr float k_opaque_cutoff = msdf::lcd::shader_reference::k_lcd_opaque_alpha_cutoff;
+
+mtr::lcd_style_t opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order order)
+{
+    mtr::lcd_style_t style;
+    style.order            = order;
+    style.background_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+    return style;
+}
+
+mtr::glow_style_t visible_glow()
+{
+    mtr::glow_style_t style;
+    style.color     = { 0.0f, 0.0f, 0.0f, 0.75f };
+    style.radius_px = 3.0f;
+    return style;
+}
+
+/// A batch of the shared sample text, with frame rectangles when asked for.
+bool build_sample_batch(
+    const mtr::Font_snapshot& font,
+    bool                      with_frames,
+    mtr::Text_batch&          out_batch)
+{
+    if (with_frames &&
+        !check_status(
+            out_batch.enable_glyph_frames(),
+            mtr::Text_status::OK,
+            "glyph frames must be enabled on an empty batch"))
+    {
+        return false;
+    }
+
+    return check_status(
+        out_batch.append_run(font, "Varinomics 01", 8.0f, 40.0f),
+        mtr::Text_status::OK,
+        "the sample run must be appended");
+}
+
+bool test_batch_glyph_frames_bound_their_own_quads()
+{
+    const mtr::Font_snapshot& font = shared_snapshot();
+
+    mtr::Text_batch plain;
+    bool ok = check(!plain.has_glyph_frames(), "a batch carries no frame rectangles by default");
+    ok &= check(plain.glyph_frames().empty(), "a batch without the capability exposes no frames");
+    ok &= check_status(
+        plain.append_run(font, "Varinomics", 4.0f, 20.0f),
+        mtr::Text_status::OK,
+        "a plain run must append");
+    ok &= check(
+        plain.glyph_frames().empty(),
+        "a run appended without the capability must still carry no frames");
+    ok &= check_status(
+        plain.enable_glyph_frames(),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "frame rectangles cannot be turned on part-way through a batch");
+
+    mtr::glyph_frames_t unknown;
+    unknown.version = mtr::k_glyph_frames_version + 1u;
+    mtr::Text_batch future;
+    ok &= check_status(
+        future.enable_glyph_frames(unknown),
+        mtr::Text_status::CAPABILITY_UNSUPPORTED,
+        "an unknown glyph-frame version must be reported at its own boundary");
+    ok &= check(
+        !future.has_glyph_frames(),
+        "a rejected capability must leave the batch without it");
+    ok &= check_status(
+        future.append_run(font, "Varinomics", 4.0f, 20.0f),
+        mtr::Text_status::OK,
+        "a batch that rejected an unknown version still appends base geometry");
+
+    mtr::Text_batch framed;
+    ok &= build_sample_batch(font, true, framed);
+    ok &= check(framed.has_glyph_frames(), "the capability must be observable on the batch");
+    ok &= check(
+        framed.glyph_frames().size() == framed.vertices().size(),
+        "a framed batch carries one rectangle per vertex");
+
+    // Every quad's rectangle must be that quad's own bound, which is what makes
+    // the fragment stage's reconstruction of a fragment's place in its glyph
+    // agree with where the vertices actually put it.
+    const std::span<const msdf::text_vertex_t> vertices = framed.vertices();
+    const std::span<const mtr::glyph_frame_t>  frames   = framed.glyph_frames();
+    ok &= check(vertices.size() % 4u == 0u, "a run emits whole quads");
+    for (std::size_t i = 0; ok && i + 4u <= vertices.size(); i += 4u) {
+        float left   = vertices[i].x;
+        float top    = vertices[i].y;
+        float right  = left;
+        float bottom = top;
+        for (std::size_t corner = 1; corner < 4u; ++corner) {
+            left   = std::min(left,   vertices[i + corner].x);
+            top    = std::min(top,    vertices[i + corner].y);
+            right  = std::max(right,  vertices[i + corner].x);
+            bottom = std::max(bottom, vertices[i + corner].y);
+        }
+
+        for (std::size_t corner = 0; corner < 4u; ++corner) {
+            const mtr::glyph_frame_t& frame = frames[i + corner];
+            ok &= check(
+                frame.x == left && frame.y == top &&
+                frame.width == right - left && frame.height == bottom - top,
+                "every vertex of a quad must carry that quad's own rectangle");
+        }
+        ok &= check(
+            frames[i].width > 0.0f && frames[i].height > 0.0f,
+            "a visible glyph's rectangle must have a positive size");
+    }
+
+    framed.clear();
+    ok &= check(
+        !framed.has_glyph_frames() && framed.glyph_frames().empty(),
+        "clear() returns a batch to its default state, frame rectangles included");
+
+    return ok;
+}
+
+bool test_batch_quads_and_frames_must_agree()
+{
+    const mtr::Font_snapshot& font = shared_snapshot();
+
+    mtr::Text_batch source;
+    bool ok = build_sample_batch(font, true, source);
+    if (!ok) {
+        return false;
+    }
+
+    const std::vector<msdf::text_vertex_t> vertices(
+        source.vertices().begin(), source.vertices().end());
+    const std::vector<std::uint32_t> indices(source.indices().begin(), source.indices().end());
+    const std::vector<mtr::glyph_frame_t> frames(
+        source.glyph_frames().begin(), source.glyph_frames().end());
+
+    mtr::Text_batch framed;
+    ok &= check_status(framed.enable_glyph_frames(), mtr::Text_status::OK, "frames must enable");
+    ok &= check_status(
+        framed.append_quads(font, vertices, indices),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a framed batch must be given one rectangle per vertex");
+    ok &= check(
+        framed.empty() && framed.glyph_frames().empty(),
+        "a rejected append must leave the batch untouched");
+    ok &= check_status(
+        framed.append_quads(
+            font, vertices, indices,
+            std::span<const mtr::glyph_frame_t>(frames).first(frames.size() - 4u)),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a short rectangle span must be rejected");
+    const auto rejects_invalid_frames = [&](std::vector<mtr::glyph_frame_t> invalid, std::string_view message) {
+        const mtr::text_result_t result = framed.append_quads(font, vertices, indices, invalid);
+        return
+            check_status(result, mtr::Text_status::INVALID_ARGUMENT, message) &&
+            check(
+                framed.empty() && framed.glyph_frames().empty(),
+                "invalid frame rectangles must leave the batch untouched");
+    };
+
+    std::vector<mtr::glyph_frame_t> invalid = frames;
+    invalid[0].width = std::numeric_limits<float>::quiet_NaN();
+    ok &= rejects_invalid_frames(invalid, "a non-finite frame rectangle must be rejected");
+
+    invalid = frames;
+    invalid[0].height = -1.0f;
+    ok &= rejects_invalid_frames(invalid, "a non-positive frame rectangle must be rejected");
+
+    invalid = frames;
+    invalid[1].x += 1.0f;
+    ok &= rejects_invalid_frames(invalid, "a quad whose vertices disagree on its frame must be rejected");
+
+    invalid = frames;
+    invalid[0].width += 1.0f;
+    invalid[1].width += 1.0f;
+    invalid[2].width += 1.0f;
+    invalid[3].width += 1.0f;
+    ok &= rejects_invalid_frames(invalid, "a frame that is not its quad's AABB must be rejected");
+
+    const std::vector<msdf::text_vertex_t> triangle(vertices.begin(), vertices.begin() + 3);
+    const std::array<std::uint32_t, 3> triangle_indices = { 0u, 1u, 2u };
+    const std::array<mtr::glyph_frame_t, 3> triangle_frames = {
+        frames[0], frames[0], frames[0],
+    };
+    ok &= check_status(
+        framed.append_quads(font, triangle, triangle_indices, triangle_frames),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "frame rectangles must be grouped by complete quads");
+    ok &= check(
+        framed.empty() && framed.glyph_frames().empty(),
+        "an incomplete frame group must leave the batch untouched");
+    ok &= check_status(
+        framed.append_quads(font, vertices, indices, frames),
+        mtr::Text_status::OK,
+        "matching vertices and rectangles must append");
+    ok &= check(
+        framed.glyph_frames().size() == framed.vertices().size(),
+        "the appended rectangles must stay parallel to the vertices");
+
+    mtr::Text_batch plain;
+    ok &= check_status(
+        plain.append_quads(font, vertices, indices, frames),
+        mtr::Text_status::INVALID_ARGUMENT,
+        "a batch without the capability must not accept rectangles");
+    ok &= check(plain.empty(), "that rejection must leave the batch empty");
+    ok &= check_status(
+        plain.append_quads(font, vertices, indices),
+        mtr::Text_status::OK,
+        "the same quads without rectangles must append");
+
+    return ok;
+}
+
+bool test_null_unknown_capability_versions_stay_local()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    if (!check(rhi != nullptr, "the Null QRhi backend must be available")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(offscreen.valid() && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch framed;
+    bool ok = build_sample_batch(*held.snapshot, true, framed);
+    if (!ok) {
+        return false;
+    }
+
+    struct case_t
+    {
+        const char*       name;
+        mtr::draw_state_t state;
+        mtr::Text_status  status;
+    };
+
+    std::vector<case_t> cases;
+    {
+        mtr::draw_state_t state;
+        state.lcd          = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::RGB);
+        state.lcd->version = mtr::k_lcd_style_version + 1u;
+        cases.push_back({ "lcd", state, mtr::Text_status::CAPABILITY_UNSUPPORTED });
+    }
+    {
+        mtr::draw_state_t state;
+        state.glow          = visible_glow();
+        state.glow->version = mtr::k_glow_style_version + 1u;
+        cases.push_back({ "glow", state, mtr::Text_status::CAPABILITY_UNSUPPORTED });
+    }
+    {
+        mtr::draw_state_t state;
+        state.sdf_mask          = mtr::sdf_mask_t{};
+        state.sdf_mask->version = mtr::k_sdf_mask_version + 1u;
+        cases.push_back({ "sdf mask", state, mtr::Text_status::CAPABILITY_UNSUPPORTED });
+    }
+    {
+        mtr::draw_state_t state;
+        state.lcd = opaque_lcd(static_cast<msdf::lcd::Resolved_lcd_subpixel_order>(255u));
+        cases.push_back({ "unknown LCD order", state, mtr::Text_status::INVALID_ARGUMENT });
+    }
+
+    QRhiCommandBuffer* cb = nullptr;
+    ok &= check(
+        rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+        "the offscreen frame must begin");
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+
+    // The base draw is queued first, then every unknown version is refused, and
+    // the base draw still records: an unknown optional version cannot take the
+    // frame's ordinary text down with it.
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(framed, mtr::draw_state_t{}), mtr::Text_status::OK,
+        "the frame's base text must queue");
+
+    for (const case_t& item : cases) {
+        ok &= check_status(
+            renderer.queue(framed, item.state), item.status,
+            item.name);
+        ok &= check(
+            renderer.diagnostics().queued_draws == 1,
+            "a refused draw must leave the queued frame exactly as it was");
+    }
+
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the frame must prepare");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the frame must record");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+
+    const mtr::renderer_diagnostics_t after = renderer.diagnostics();
+    ok &= check(after.recorded_draws == 1, "the base draw must have recorded");
+    ok &= check(
+        after.styled_pipeline_builds == 0,
+        "no refused draw may have built the styled pipeline");
+
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_empty_batches_reject_unknown_capability_versions()
+{
+    mtr::Text_renderer renderer;
+    mtr::Text_batch    empty;
+
+    mtr::draw_state_t future;
+    future.lcd          = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::RGB);
+    future.lcd->version = mtr::k_lcd_style_version + 1u;
+
+    bool ok = check_status(
+        renderer.queue(empty, future), mtr::Text_status::CAPABILITY_UNSUPPORTED,
+        "an empty batch must still reject an unknown optional capability version");
+    ok &= check(
+        renderer.diagnostics().queued_draws == 0 && renderer.diagnostics().queued_indices == 0,
+        "an empty batch with an unknown capability must leave the queue empty");
+    return ok;
+}
+
+bool test_invalid_optional_records_stay_local()
+{
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(held.snapshot != nullptr, "the renderer's snapshot must build")) {
+        return false;
+    }
+
+    mtr::Text_batch base;
+    mtr::Text_batch framed;
+    bool ok = build_sample_batch(*held.snapshot, false, base);
+    ok     &= build_sample_batch(*held.snapshot, true, framed);
+    if (!ok) {
+        return false;
+    }
+
+    struct case_t
+    {
+        const char*       name;
+        mtr::draw_state_t state;
+    };
+
+    std::vector<case_t> cases;
+    {
+        mtr::draw_state_t state;
+        state.lcd = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::RGB);
+        state.lcd->background_color[0] = -0.1f;
+        cases.push_back({ "an LCD background below the unit interval", state });
+    }
+    {
+        mtr::draw_state_t state;
+        state.lcd = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::NONE);
+        state.lcd->background_color[2] = std::numeric_limits<float>::infinity();
+        cases.push_back({ "a non-finite LCD background", state });
+    }
+    {
+        mtr::draw_state_t state;
+        state.glow = visible_glow();
+        state.glow->color[1] = 1.1f;
+        cases.push_back({ "a glow colour above the unit interval", state });
+    }
+    {
+        mtr::draw_state_t state;
+        state.glow = visible_glow();
+        state.glow->color[3] = std::numeric_limits<float>::quiet_NaN();
+        cases.push_back({ "a non-finite glow colour", state });
+    }
+    {
+        mtr::draw_state_t state;
+        state.sdf_mask = mtr::sdf_mask_t{};
+        state.color[0] = 1.1f;
+        cases.push_back({ "a styled draw colour above the unit interval", state });
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    for (const case_t& item : cases) {
+        renderer.begin_frame();
+        ok &= check_status(
+            renderer.queue(base, mtr::draw_state_t{}), mtr::Text_status::OK,
+            "the comparison base draw must queue");
+        const mtr::renderer_diagnostics_t before = renderer.diagnostics();
+        ok &= check_status(
+            renderer.queue(framed, item.state), mtr::Text_status::INVALID_ARGUMENT, item.name);
+        const mtr::renderer_diagnostics_t after = renderer.diagnostics();
+        ok &= check(
+            after.queued_draws == before.queued_draws &&
+                after.queued_indices == before.queued_indices,
+            "an invalid optional record must leave an existing base draw unchanged");
+    }
+
+    renderer.reset_frame();
+    return ok;
+}
+
+bool test_glow_reports_its_two_queued_index_ranges()
+{
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(held.snapshot != nullptr, "the renderer's snapshot must build")) {
+        return false;
+    }
+
+    mtr::Text_batch framed;
+    if (!build_sample_batch(*held.snapshot, true, framed)) {
+        return false;
+    }
+
+    mtr::draw_state_t glowing;
+    glowing.glow = visible_glow();
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    renderer.begin_frame();
+    bool ok = check_status(
+        renderer.queue(framed, glowing), mtr::Text_status::OK, "a glowing draw must queue");
+    const mtr::renderer_diagnostics_t queued = renderer.diagnostics();
+    ok &= check(queued.queued_draws == 2, "a glowing draw queues two draw operations");
+    ok &= check(
+        queued.queued_indices == framed.indices().size() * 2u,
+        "queued indices must include both of a glowing draw's index ranges");
+    renderer.reset_frame();
+    return ok;
+}
+
+bool test_styled_transform_rejects_before_preparation_mutates_resources()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(rhi != nullptr && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    mtr::Text_batch framed;
+    if (!check(offscreen.valid(), "the Null target must be valid") ||
+        !build_sample_batch(*held.snapshot, true, framed))
+    {
+        return false;
+    }
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the offscreen frame must begin"))
+    {
+        return false;
+    }
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+
+    mtr::draw_state_t styled;
+    styled.sdf_mask = mtr::sdf_mask_t{};
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    renderer.begin_frame();
+    bool ok = check_status(
+        renderer.queue(framed, styled), mtr::Text_status::OK, "the invalid-transform draw must queue");
+    const mtr::renderer_diagnostics_t before = renderer.diagnostics();
+    ok &= check_status(
+        renderer.prepare(frame), mtr::Text_status::INVALID_ARGUMENT,
+        "a styled draw without the frame pixel transform must be rejected");
+    const mtr::renderer_diagnostics_t rejected = renderer.diagnostics();
+    ok &= check(
+        rejected.queued_draws == before.queued_draws &&
+            rejected.queued_indices == before.queued_indices &&
+            rejected.atlas_upload_enqueues == before.atlas_upload_enqueues &&
+            rejected.buffer_upload_enqueues == before.buffer_upload_enqueues &&
+            rejected.styled_pipeline_builds == before.styled_pipeline_builds,
+        "a rejected styled transform must not mutate pending work or GPU resource state");
+
+    renderer.reset_frame();
+    styled.transform = mtr::pixel_ortho_transform(frame);
+    ok &= check_status(
+        renderer.queue(framed, styled), mtr::Text_status::OK,
+        "a styled draw with the documented transform must queue");
+    ok &= check_status(
+        renderer.prepare(frame), mtr::Text_status::OK,
+        "the corrected styled draw must prepare after the rejection");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the corrected styled draw must record");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_null_prepare_base_survives_uniform_staging_failure()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(rhi != nullptr && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    mtr::Text_batch batch;
+    if (!check(offscreen.valid(), "the Null target must be valid") ||
+        !build_sample_batch(*held.snapshot, false, batch))
+    {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    mtr::text_result_t prepared{};
+    if (!check_status(
+            run_null_frame(*rhi, offscreen, renderer, batch, mtr::draw_state_t{}, prepared),
+            mtr::Text_status::OK,
+            "the warm-up base frame must record"))
+    {
+        renderer.release_resources();
+        return false;
+    }
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the allocation-failure frame must begin"))
+    {
+        renderer.release_resources();
+        return false;
+    }
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+
+    renderer.begin_frame();
+    bool ok = check_status(renderer.queue(batch, {}), mtr::Text_status::OK, "the first base retry draw queues");
+    ok &= check_status(renderer.queue(batch, {}), mtr::Text_status::OK, "the second base retry draw queues");
+    const mtr::renderer_diagnostics_t before = renderer.diagnostics();
+
+    mtr::text_result_t failed{};
+    try {
+        Failing_allocation fail(0);
+        failed = renderer.prepare(frame);
+    }
+    catch (const std::exception&) {
+        ok &= check(false, "base uniform staging must return a status instead of throwing");
+    }
+    ok &= check_status(failed, mtr::Text_status::OUT_OF_MEMORY, "base uniform staging allocation failure");
+    const mtr::renderer_diagnostics_t rejected = renderer.diagnostics();
+    ok &= check(
+        rejected.queued_draws == before.queued_draws &&
+            rejected.queued_indices == before.queued_indices &&
+            rejected.buffer_upload_enqueues == before.buffer_upload_enqueues,
+        "a base staging failure must leave the frame retry-safe");
+
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the base frame must prepare on retry");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the base frame must record on retry");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_null_prepare_styled_survives_uniform_staging_failure()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(rhi != nullptr && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    mtr::Text_batch batch;
+    if (!check(offscreen.valid(), "the Null target must be valid") ||
+        !build_sample_batch(*held.snapshot, true, batch))
+    {
+        return false;
+    }
+
+    mtr::draw_state_t styled;
+    styled.sdf_mask = mtr::sdf_mask_t{};
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    mtr::text_result_t prepared{};
+    if (!check_status(
+            run_null_frame(*rhi, offscreen, renderer, batch, styled, prepared),
+            mtr::Text_status::OK,
+            "the warm-up styled frame must record"))
+    {
+        renderer.release_resources();
+        return false;
+    }
+
+    QRhiCommandBuffer* cb = nullptr;
+    if (!check(
+            rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+            "the allocation-failure frame must begin"))
+    {
+        renderer.release_resources();
+        return false;
+    }
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+    styled.transform       = mtr::pixel_ortho_transform(frame);
+
+    renderer.begin_frame();
+    bool ok = check_status(renderer.queue(batch, styled), mtr::Text_status::OK, "the first styled retry draw queues");
+    ok &= check_status(renderer.queue(batch, styled), mtr::Text_status::OK, "the second styled retry draw queues");
+    const mtr::renderer_diagnostics_t before = renderer.diagnostics();
+
+    mtr::text_result_t failed{};
+    try {
+        // The copied per-frame blocks survive this one allocation; staging the
+        // byte buffer is the next allocation and must report OUT_OF_MEMORY.
+        Failing_allocation fail(1);
+        failed = renderer.prepare(frame);
+    }
+    catch (const std::exception&) {
+        ok &= check(false, "styled uniform staging must return a status instead of throwing");
+    }
+    ok &= check_status(failed, mtr::Text_status::OUT_OF_MEMORY, "styled uniform staging allocation failure");
+    const mtr::renderer_diagnostics_t rejected = renderer.diagnostics();
+    ok &= check(
+        rejected.queued_draws == before.queued_draws &&
+            rejected.queued_indices == before.queued_indices &&
+            rejected.buffer_upload_enqueues == before.buffer_upload_enqueues,
+        "a styled staging failure must leave the frame retry-safe");
+
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the styled frame must prepare on retry");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the styled frame must record on retry");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_null_rejects_undrawable_capability_combinations()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    if (!check(rhi != nullptr, "the Null QRhi backend must be available")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(offscreen.valid() && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch framed;
+    mtr::Text_batch frameless;
+    bool ok = build_sample_batch(*held.snapshot, true,  framed);
+    ok     &= build_sample_batch(*held.snapshot, false, frameless);
+    if (!ok) {
+        return false;
+    }
+
+    const auto queue_alone = [&](const mtr::Text_batch& batch, const mtr::draw_state_t& state) {
+        renderer.begin_frame();
+        return renderer.queue(batch, state);
+    };
+
+    {
+        mtr::draw_state_t state;
+        state.sdf_mask = mtr::sdf_mask_t{};
+        ok &= check_status(
+            queue_alone(frameless, state),
+            mtr::Text_status::INVALID_ARGUMENT,
+            "a styled draw needs a batch with frame rectangles");
+    }
+    {
+        mtr::draw_state_t state;
+        state.glow            = visible_glow();
+        state.glow->radius_px = 0.0f;
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::INVALID_ARGUMENT,
+            "a glow with no radius must be refused rather than drawn as nothing");
+    }
+    {
+        mtr::draw_state_t state;
+        state.glow           = visible_glow();
+        state.glow->color[3] = 0.0f;
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::INVALID_ARGUMENT,
+            "an invisible glow colour must be refused");
+    }
+    {
+        mtr::draw_state_t state;
+        state.lcd  = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::RGB);
+        state.glow = visible_glow();
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::INVALID_ARGUMENT,
+            "a subpixel order and a glow cannot be drawn in one draw state");
+    }
+    {
+        mtr::draw_state_t state;
+        state.lcd      = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::BGR);
+        state.color[3] = std::nextafter(k_opaque_cutoff, 0.0f);
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::INVALID_ARGUMENT,
+            "a subpixel order below the shared opacity cutoff must be refused");
+    }
+    {
+        mtr::draw_state_t state;
+        state.lcd                        = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::BGR);
+        state.lcd->background_color[3]   = std::nextafter(k_opaque_cutoff, 0.0f);
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::INVALID_ARGUMENT,
+            "a background below the shared opacity cutoff must be refused");
+    }
+
+    // Exactly at the shared cutoff the same draw is accepted, which is what
+    // binds this component's CPU decision to lcd_shader_reference rather than
+    // to a threshold of its own.
+    {
+        mtr::draw_state_t state;
+        state.lcd                      = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::BGR);
+        state.color[3]                 = k_opaque_cutoff;
+        state.lcd->background_color[3] = k_opaque_cutoff;
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::OK,
+            "a draw at the shared opacity cutoff must be accepted");
+    }
+
+    // NONE asks for no subpixel filtering, so none of the opacity conditions
+    // apply to it and a translucent draw with a background is still valid.
+    {
+        mtr::draw_state_t state;
+        state.lcd      = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::NONE);
+        state.color[3] = 0.25f;
+        ok &= check_status(
+            queue_alone(framed, state),
+            mtr::Text_status::OK,
+            "an order of NONE places no opacity condition on the draw");
+    }
+
+    renderer.reset_frame();
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_null_base_path_is_untouched_by_the_capability_set()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    if (!check(rhi != nullptr, "the Null QRhi backend must be available")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(offscreen.valid() && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    // The batch carries frame rectangles the draw state does not ask to use, so
+    // this also shows that having them is not what moves a draw off the base path.
+    mtr::Text_batch framed;
+    bool ok = build_sample_batch(*held.snapshot, true, framed);
+    if (!ok) {
+        return false;
+    }
+
+    mtr::text_result_t prepared{};
+    const mtr::text_result_t recorded =
+        run_null_frame(*rhi, offscreen, renderer, framed, mtr::draw_state_t{}, prepared);
+    ok &= check_status(prepared, mtr::Text_status::OK, "the base frame must prepare");
+    ok &= check_status(recorded, mtr::Text_status::OK, "the base frame must record");
+
+    const mtr::renderer_diagnostics_t after = renderer.diagnostics();
+    ok &= check(after.pipeline_builds == 1, "the base pipeline must be the one that was built");
+    ok &= check(
+        after.styled_pipeline_builds == 0,
+        "a frame with no optional capability must not build the styled pipeline");
+    ok &= check(
+        after.styled_vertex_buffer_bytes == 0 &&
+        after.styled_index_buffer_bytes == 0 &&
+        after.styled_uniform_buffer_bytes == 0,
+        "a frame with no optional capability must allocate no styled buffers");
+    ok &= check(
+        after.buffer_upload_enqueues == 3,
+        "the base path must still enqueue exactly its vertex, index, and uniform uploads");
+    ok &= check(after.recorded_draws == 1, "one draw state must record one draw");
+    ok &= check(
+        after.recorded_pipeline_binds == 1,
+        "a frame on one path must bind one pipeline");
+
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_null_styled_draws_use_their_own_resources()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    if (!check(rhi != nullptr, "the Null QRhi backend must be available")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(offscreen.valid() && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch framed;
+    bool ok = build_sample_batch(*held.snapshot, true, framed);
+    if (!ok) {
+        return false;
+    }
+
+    mtr::draw_state_t styled;
+    styled.lcd = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::RGB);
+
+    mtr::text_result_t prepared{};
+    mtr::text_result_t recorded =
+        run_null_frame(*rhi, offscreen, renderer, framed, styled, prepared);
+    ok &= check_status(prepared, mtr::Text_status::OK, "the styled frame must prepare");
+    ok &= check_status(recorded, mtr::Text_status::OK, "the styled frame must record");
+
+    mtr::renderer_diagnostics_t after = renderer.diagnostics();
+    ok &= check(
+        after.styled_pipeline_builds == 1,
+        "a styled frame must build the styled pipeline once");
+    ok &= check(after.pipeline_builds == 0, "a styled frame must not build the base pipeline");
+    ok &= check(
+        after.styled_vertex_buffer_bytes > 0 &&
+        after.styled_index_buffer_bytes > 0 &&
+        after.styled_uniform_buffer_bytes > 0,
+        "a styled frame must allocate the styled buffers");
+    ok &= check(
+        after.vertex_buffer_bytes == 0 && after.index_buffer_bytes == 0,
+        "a styled frame must allocate no base geometry buffers");
+    ok &= check(
+        after.buffer_upload_enqueues == 3,
+        "a styled frame must enqueue exactly its own three uploads");
+    ok &= check(after.recorded_draws == 1, "one styled draw state must record one draw");
+
+    // A glow is drawn under the glyphs of its own draw, so it is a second draw
+    // call rather than a second composite inside the same fragment.
+    mtr::draw_state_t glowing;
+    glowing.glow     = visible_glow();
+    glowing.sdf_mask = mtr::sdf_mask_t{};
+
+    const std::uint64_t builds_before = after.styled_pipeline_builds;
+    recorded = run_null_frame(*rhi, offscreen, renderer, framed, glowing, prepared);
+    ok &= check_status(prepared, mtr::Text_status::OK, "the glowing frame must prepare");
+    ok &= check_status(recorded, mtr::Text_status::OK, "the glowing frame must record");
+
+    after = renderer.diagnostics();
+    ok &= check(after.recorded_draws == 2, "a glow adds one draw under the glyphs");
+    ok &= check(
+        after.queued_indices == 0,
+        "queued index diagnostics clear after the glowing frame records");
+    ok &= check(
+        after.recorded_pipeline_binds == 1,
+        "both of a glowing draw's calls run on one pipeline");
+    ok &= check(
+        after.styled_pipeline_builds == builds_before,
+        "an unchanged target must not rebuild the styled pipeline");
+
+    renderer.release_resources();
+    ok &= check(
+        renderer.diagnostics().styled_vertex_buffer_bytes == 0,
+        "releasing resources must drop the styled buffers too");
+
+    return ok;
+}
+
+bool test_null_styled_resources_recreate_and_stay_device_local()
+{
+    std::unique_ptr<QRhi> first_rhi  = make_null_rhi();
+    std::unique_ptr<QRhi> second_rhi = make_null_rhi();
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(
+            first_rhi != nullptr && second_rhi != nullptr && held.snapshot != nullptr,
+            "two Null devices must be available"))
+    {
+        return false;
+    }
+
+    Offscreen_target first_target(*first_rhi, QSize(320, 64), 1);
+    Offscreen_target wider_target(*first_rhi, QSize(640, 128), 1);
+    Offscreen_target second_device_target(*second_rhi, QSize(320, 64), 1);
+    if (!check(
+            first_target.valid() && wider_target.valid() && second_device_target.valid(),
+            "every offscreen render target must be created"))
+    {
+        return false;
+    }
+
+    mtr::Text_batch framed;
+    mtr::Text_batch long_framed;
+    bool ok = build_sample_batch(*held.snapshot, true, framed);
+    ok     &= check_status(
+        long_framed.enable_glyph_frames(), mtr::Text_status::OK, "frames must enable");
+    for (int line = 0; line < 64; ++line) {
+        ok &= check_status(
+            long_framed.append_run(
+                *held.snapshot, "Varinomics 0123456789", 8.0f, 40.0f + float(line)),
+            mtr::Text_status::OK,
+            "the long framed run must be appended");
+    }
+    if (!ok) {
+        return false;
+    }
+
+    mtr::draw_state_t styled;
+    styled.lcd = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::NONE);
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::text_result_t prepared{};
+    ok &= check_status(
+        run_null_frame(*first_rhi, first_target, renderer, framed, styled, prepared),
+        mtr::Text_status::OK,
+        "the first styled frame must record");
+    const mtr::renderer_diagnostics_t first = renderer.diagnostics();
+    ok &= check(first.styled_pipeline_builds == 1, "the first styled frame must build its pipeline");
+
+    ok &= check_status(
+        run_null_frame(*first_rhi, first_target, renderer, framed, styled, prepared),
+        mtr::Text_status::OK,
+        "the repeated styled frame must record");
+    const mtr::renderer_diagnostics_t unchanged = renderer.diagnostics();
+    ok &= check(
+        unchanged.styled_pipeline_builds == first.styled_pipeline_builds &&
+        unchanged.styled_vertex_buffer_bytes == first.styled_vertex_buffer_bytes,
+        "an unchanged styled frame must rebuild nothing");
+
+    ok &= check_status(
+        run_null_frame(*first_rhi, first_target, renderer, long_framed, styled, prepared),
+        mtr::Text_status::OK,
+        "the growing styled frame must record");
+    const mtr::renderer_diagnostics_t grown = renderer.diagnostics();
+    ok &= check(
+        grown.styled_vertex_buffer_bytes > unchanged.styled_vertex_buffer_bytes &&
+        grown.styled_index_buffer_bytes > unchanged.styled_index_buffer_bytes,
+        "a larger styled frame must grow the styled geometry buffers");
+    ok &= check(
+        grown.styled_pipeline_builds == unchanged.styled_pipeline_builds,
+        "growing the styled buffers must not rebuild the styled pipeline");
+
+    ok &= check_status(
+        run_null_frame(*first_rhi, wider_target, renderer, framed, styled, prepared),
+        mtr::Text_status::OK,
+        "the retargeted styled frame must record");
+    ok &= check(
+        renderer.diagnostics().styled_pipeline_builds > grown.styled_pipeline_builds,
+        "a different render pass must rebuild the styled pipeline");
+
+    const mtr::renderer_diagnostics_t before_release = renderer.diagnostics();
+    renderer.release_resources();
+    const mtr::renderer_diagnostics_t released = renderer.diagnostics();
+    ok &= check(
+        released.resource_generation == before_release.resource_generation + 1 &&
+        released.styled_vertex_buffer_bytes == 0 &&
+        released.styled_index_buffer_bytes == 0 &&
+        released.styled_uniform_buffer_bytes == 0,
+        "releasing resources must drop the styled set with the rest");
+
+    ok &= check_status(
+        run_null_frame(*first_rhi, wider_target, renderer, framed, styled, prepared),
+        mtr::Text_status::OK,
+        "the styled frame after a release must record");
+    ok &= check(
+        renderer.diagnostics().styled_pipeline_builds == released.styled_pipeline_builds + 1,
+        "a released renderer must rebuild the styled pipeline before recording again");
+
+    // A second renderer on a second device owns its own styled resources: it
+    // starts from nothing, and drawing on it moves no counter on the first.
+    const mtr::renderer_diagnostics_t first_before_second = renderer.diagnostics();
+
+    mtr::Text_renderer second_renderer;
+    second_renderer.set_font(held.snapshot);
+    ok &= check(
+        second_renderer.diagnostics().styled_pipeline_builds == 0,
+        "a fresh renderer owns no styled pipeline");
+    ok &= check_status(
+        run_null_frame(*second_rhi, second_device_target, second_renderer, framed, styled, prepared),
+        mtr::Text_status::OK,
+        "the second device's styled frame must record");
+    ok &= check(
+        second_renderer.diagnostics().styled_pipeline_builds == 1 &&
+        second_renderer.diagnostics().styled_vertex_buffer_bytes > 0,
+        "the second device must build its own styled resources");
+
+    const mtr::renderer_diagnostics_t first_after_second = renderer.diagnostics();
+    ok &= check(
+        first_after_second.styled_pipeline_builds == first_before_second.styled_pipeline_builds &&
+        first_after_second.resource_generation == first_before_second.resource_generation &&
+        first_after_second.styled_vertex_buffer_bytes ==
+            first_before_second.styled_vertex_buffer_bytes,
+        "one device's styled work must not touch another device's resources");
+
+    renderer.release_resources();
+    second_renderer.release_resources();
+    return ok;
+}
+
+bool test_null_mixed_paths_record_in_queue_order()
+{
+    std::unique_ptr<QRhi> rhi = make_null_rhi();
+    if (!check(rhi != nullptr, "the Null QRhi backend must be available")) {
+        return false;
+    }
+
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    const mtr::font_snapshot_result_t held = build_sample_snapshot();
+    if (!check(offscreen.valid() && held.snapshot != nullptr, "the Null fixture must build")) {
+        return false;
+    }
+
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+
+    mtr::Text_batch framed;
+    bool ok = build_sample_batch(*held.snapshot, true, framed);
+    if (!ok) {
+        return false;
+    }
+
+    mtr::draw_state_t styled;
+    styled.lcd = opaque_lcd(msdf::lcd::Resolved_lcd_subpixel_order::VBGR);
+
+    QRhiCommandBuffer* cb = nullptr;
+    ok &= check(
+        rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess,
+        "the offscreen frame must begin");
+
+    mtr::frame_t frame;
+    frame.rhi              = rhi.get();
+    frame.command_buffer   = cb;
+    frame.render_target    = offscreen.target();
+    frame.resource_updates = rhi->nextResourceUpdateBatch();
+    styled.transform       = mtr::pixel_ortho_transform(frame);
+
+    renderer.begin_frame();
+    ok &= check_status(
+        renderer.queue(framed, mtr::draw_state_t{}), mtr::Text_status::OK, "base text must queue");
+    ok &= check_status(renderer.queue(framed, styled), mtr::Text_status::OK, "styled text must queue");
+    ok &= check_status(
+        renderer.queue(framed, mtr::draw_state_t{}), mtr::Text_status::OK, "base text must queue again");
+    ok &= check(
+        renderer.diagnostics().queued_draws == 3,
+        "three draw states with no glow are three draws");
+
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "the mixed frame must prepare");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), { 1.0f, 0 }, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0.0f, 0.0f, 320.0f, 64.0f));
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "the mixed frame must record");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+
+    const mtr::renderer_diagnostics_t after = renderer.diagnostics();
+    ok &= check(after.recorded_draws == 3, "every queued draw must record");
+    // Base, styled, base is three runs, so the queue order was kept rather than
+    // the draws being sorted by path.
+    ok &= check(
+        after.recorded_pipeline_binds == 3,
+        "an alternating frame must bind once per change of path");
+    ok &= check(
+        after.pipeline_builds == 1 && after.styled_pipeline_builds == 1,
+        "a mixed frame must build one pipeline of each kind");
+    ok &= check(
+        after.buffer_upload_enqueues == 6,
+        "a mixed frame must enqueue three uploads for each path");
+
+    renderer.release_resources();
+    return ok;
+}
+
+bool test_shader_artifacts_cover_every_required_profile()
+{
+    struct profile_t
+    {
+        const char*       name;
+        QShader::Source   source;
+        int               version;
+        QShaderVersion::Flags flags;
+    };
+
+    const profile_t profiles[] = {
+        { "GLSL ES 3.0",  QShader::GlslShader, 300, QShaderVersion::GlslEs      },
+        { "desktop GL 3.3", QShader::GlslShader, 330, QShaderVersion::Flags()   },
+        { "desktop GL 4.1", QShader::GlslShader, 410, QShaderVersion::Flags()   },
+        { "HLSL 5.0",     QShader::HlslShader,  50, QShaderVersion::Flags()     },
+        { "Metal 1.2",    QShader::MslShader,   12, QShaderVersion::Flags()     },
+        { "Metal 2.1",    QShader::MslShader,   21, QShaderVersion::Flags()     },
+    };
+
+    const char* artifacts[] = {
+        ":/vnm_msdf_text/shaders/rhi/msdf_text.vert.qsb",
+        ":/vnm_msdf_text/shaders/rhi/msdf_text.frag.qsb",
+        ":/vnm_msdf_text/shaders/rhi/msdf_text_styled.vert.qsb",
+        ":/vnm_msdf_text/shaders/rhi/msdf_text_styled.frag.qsb",
+    };
+
+    bool ok = true;
+    for (const char* path : artifacts) {
+        QFile file(QString::fromLatin1(path));
+        if (!check(file.open(QIODevice::ReadOnly), std::string("shader artifact ") + path)) {
+            ok = false;
+            continue;
+        }
+
+        const QShader shader = QShader::fromSerialized(file.readAll());
+        ok &= check(shader.isValid(), std::string("valid artifact for ") + path);
+
+        const QList<QShaderKey> keys = shader.availableShaders();
+        bool spirv = false;
+        for (const QShaderKey& key : keys) {
+            spirv = spirv || key.source() == QShader::SpirvShader;
+        }
+        ok &= check(spirv, std::string("SPIR-V for ") + path);
+
+        for (const profile_t& profile : profiles) {
+            bool present = false;
+            for (const QShaderKey& key : keys) {
+                present = present ||
+                    (key.source() == profile.source &&
+                     key.sourceVersion().version() == profile.version &&
+                     key.sourceVersion().flags() == profile.flags);
+            }
+            ok &= check(present, std::string(profile.name) + " for " + path);
+        }
+    }
+
+    return ok;
+}
+
 bool run_test(const char* name, bool (*test)())
 {
     try {
@@ -1801,5 +2977,20 @@ int main(int argc, char** argv)
     ok &= run_test("null rejects unusable clip rectangles", test_null_rejects_unusable_clip_rectangles);
     ok &= run_test("null geometry growth keeps the pipeline", test_null_geometry_growth_keeps_the_pipeline);
     ok &= run_test("null queue survives allocation failure", test_null_queue_survives_allocation_failure);
+    ok &= run_test("batch glyph frames bound their own quads", test_batch_glyph_frames_bound_their_own_quads);
+    ok &= run_test("batch quads and frames must agree", test_batch_quads_and_frames_must_agree);
+    ok &= run_test("null unknown capability versions stay local", test_null_unknown_capability_versions_stay_local);
+    ok &= run_test("empty batches reject unknown capability versions", test_empty_batches_reject_unknown_capability_versions);
+    ok &= run_test("invalid optional records stay local", test_invalid_optional_records_stay_local);
+    ok &= run_test("null rejects undrawable capability combinations", test_null_rejects_undrawable_capability_combinations);
+    ok &= run_test("glow reports its two queued index ranges", test_glow_reports_its_two_queued_index_ranges);
+    ok &= run_test("styled transform rejects before preparation mutates resources", test_styled_transform_rejects_before_preparation_mutates_resources);
+    ok &= run_test("null base prepare survives uniform staging failure", test_null_prepare_base_survives_uniform_staging_failure);
+    ok &= run_test("null styled prepare survives uniform staging failure", test_null_prepare_styled_survives_uniform_staging_failure);
+    ok &= run_test("null base path is untouched by the capability set", test_null_base_path_is_untouched_by_the_capability_set);
+    ok &= run_test("null styled draws use their own resources", test_null_styled_draws_use_their_own_resources);
+    ok &= run_test("null styled resources recreate and stay device local", test_null_styled_resources_recreate_and_stay_device_local);
+    ok &= run_test("null mixed paths record in queue order", test_null_mixed_paths_record_in_queue_order);
+    ok &= run_test("shader artifacts cover every required profile", test_shader_artifacts_cover_every_required_profile);
     return ok ? 0 : 1;
 }
