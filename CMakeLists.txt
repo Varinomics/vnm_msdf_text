@@ -277,6 +277,19 @@ else()
     "set FETCHCONTENT_SOURCE_DIR_MSDFGEN or VNM_MSDF_TEXT_DEP_OVERRIDES_FILE.")
 endif()
 
+# These libraries remain in vnm_msdf_text's public static link closure, so any
+# local build must be usable by shared-library consumers on ELF platforms.
+foreach(_msdfgen_target IN ITEMS msdfgen-core msdfgen-ext)
+  if(TARGET ${_msdfgen_target})
+    get_target_property(_msdfgen_target_imported ${_msdfgen_target} IMPORTED)
+    if(NOT _msdfgen_target_imported)
+      set_target_properties(${_msdfgen_target} PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+      )
+    endif()
+  endif()
+endforeach()
+
 # Intentionally static: the public API exposes STL types and is meant for
 # source-level embedding, not as a stable shared-library ABI.
 add_library(vnm_msdf_text STATIC
