@@ -17,9 +17,7 @@ project(vnm_msdf_text_rhi_source_consumer LANGUAGES CXX)
 get_filename_component(VNM_MSDF_TEXT_CONSUMED_SOURCE_DIR
   "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 
-set(VNM_MSDF_TEXT_CONSUMER_FONT_FILE
-  "${VNM_MSDF_TEXT_CONSUMED_SOURCE_DIR}/fonts/monospace.ttf"
-  CACHE FILEPATH "Font the source consumer bakes a snapshot from")
+include("${VNM_MSDF_TEXT_CONSUMED_SOURCE_DIR}/cmake/vnm_msdf_text_fonts.cmake")
 
 # The opt-in the component documents, and nothing else. How the consumed tree
 # resolves FreeType and msdfgen stays the configuring caller's choice, exactly
@@ -45,4 +43,4 @@ add_executable(vnm_msdf_text_rhi_source_consumer main.cpp)
 target_link_libraries(vnm_msdf_text_rhi_source_consumer PRIVATE vnm_msdf_text::rhi)
 target_compile_features(vnm_msdf_text_rhi_source_consumer PRIVATE cxx_std_20)
 target_compile_definitions(vnm_msdf_text_rhi_source_consumer PRIVATE
-  VNM_MSDF_TEXT_CONSUMER_FONT_FILE="${VNM_MSDF_TEXT_CONSUMER_FONT_FILE}")
+  VNM_MSDF_TEXT_CONSUMER_FONT_FILE="${VNM_MSDF_TEXT_FONT_FILE}")

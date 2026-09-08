@@ -433,6 +433,8 @@ set(VNM_MSDF_TEXT_HAS_RHI ${VNM_MSDF_TEXT_BUILD_RHI}
 if(VNM_MSDF_TEXT_BUILD_TESTS)
   enable_testing()
 
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/vnm_msdf_text_fonts.cmake)
+
   add_executable(vnm_msdf_text_tests
     tests/msdf_text_tests.cpp
   )
@@ -442,7 +444,7 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
   )
   target_compile_features(vnm_msdf_text_tests PRIVATE cxx_std_20)
   target_compile_definitions(vnm_msdf_text_tests PRIVATE
-    VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
+    VNM_MSDF_TEXT_TEST_FONT_FILE="${VNM_MSDF_TEXT_FONT_FILE}"
   )
 
   if(MSVC)
@@ -508,7 +510,7 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
     )
     target_compile_features(vnm_msdf_text_rhi_tests PRIVATE cxx_std_20)
     target_compile_definitions(vnm_msdf_text_rhi_tests PRIVATE
-      VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
+      VNM_MSDF_TEXT_TEST_FONT_FILE="${VNM_MSDF_TEXT_FONT_FILE}"
     )
 
     if(MSVC)
@@ -557,7 +559,7 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
     )
     target_compile_features(vnm_msdf_text_rhi_real_backend_tests PRIVATE cxx_std_20)
     target_compile_definitions(vnm_msdf_text_rhi_real_backend_tests PRIVATE
-      VNM_MSDF_TEXT_TEST_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/fonts/monospace.ttf"
+      VNM_MSDF_TEXT_TEST_FONT_FILE="${VNM_MSDF_TEXT_FONT_FILE}"
     )
 
     if(MSVC)

@@ -41,9 +41,11 @@ Versioned package lookup requires the exact current project version.
 
 ## Licensing
 
-The source code is licensed under the BSD 2-Clause License. The bundled
-`fonts/monospace.ttf` font is licensed separately under the Ubuntu Font Licence
-1.0; see `THIRD_PARTY_NOTICES.md`.
+The source code is licensed under the BSD 2-Clause License, and this repository
+redistributes no third-party asset. The font the tests and the source-consumer
+gate bake comes from [vnm_fonts](https://github.com/Varinomics/vnm_fonts), which
+ships it byte-verbatim under the Ubuntu Font Licence 1.0 and carries that
+licence's text and notice; see `THIRD_PARTY_NOTICES.md`.
 
 ## API contract
 
@@ -439,6 +441,22 @@ ctest --test-dir build --output-on-failure
 ```
 
 Set `-DVNM_MSDF_TEXT_BUILD_TESTS=OFF` to skip the test executable.
+
+The tests bake their atlases from a font that lives in
+[vnm_fonts](https://github.com/Varinomics/vnm_fonts), so a test build resolves
+that repository. A tree that has already added vnm_fonts has published the
+verbatim files in `VNM_FONTS_DIRECTORY`, and that is used as it stands;
+otherwise a checkout beside this one is used when it exists and CMake fetches
+`master` when it does not, and `VNM_MSDF_TEXT_VNM_FONTS_SOURCE_DIR` overrides
+that pair.
+
+Only the file contract is used. vnm_fonts configures without Qt and publishes
+`VNM_FONTS_DIRECTORY` either way, so adding it puts no Qt in front of this
+build. Its `vnm::fonts` library marks a family name on the way into
+`QFontDatabase`, which is what two files declaring one family need so they
+cannot merge into a single entry. An atlas is baked from the file's bytes and
+enters no font database, so nothing here can collide with a font the user has
+installed and `vnm::fonts` is deliberately not linked.
 
 A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` registers further tests.
 `vnm_msdf_text_rhi_tests` covers the snapshot, batch, frame, and optional
