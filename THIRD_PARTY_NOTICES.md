@@ -6,10 +6,10 @@ in `LICENSE.txt`. This repository redistributes no third-party asset.
 ## The font the tests bake
 
 `vnm_msdf_text_tests`, the QRhi test suites, and `tests/source_consumer` bake
-their atlases from Ubuntu Mono - Bront, which comes from
+their atlases from Ubuntu Sans Mono derivative vnm, which comes from
 [vnm_fonts](https://github.com/Varinomics/vnm_fonts) as
-`fonts/UbuntuMono-Bront.ttf`. That repository ships the file byte-verbatim and
-carries its notice and the Ubuntu Font Licence 1.0 text in
+`fonts/UbuntuSansMonoDerivativeVnm-Regular.ttf`. That repository ships the file
+byte-verbatim and carries its notice and the Ubuntu Font Licence 1.0 text in
 `THIRD_PARTY_NOTICES.md` and `LICENSES/Ubuntu-Font-Licence-1.0.txt`. The font is
 a build input to the tests; it is neither checked in here nor embedded in
 anything this repository produces, so no font bytes are distributed with

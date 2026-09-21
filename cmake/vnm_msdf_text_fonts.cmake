@@ -1,6 +1,7 @@
 # The font this repository's tests and its source-consumer gate bake an atlas
-# from: Ubuntu Mono - Bront, taken from vnm_fonts, which ships every font
-# Varinomics embeds byte-verbatim together with its licence and notice.
+# from: Ubuntu Sans Mono derivative vnm, taken from vnm_fonts, which ships
+# every font Varinomics embeds byte-verbatim together with its licence and
+# notice.
 #
 # vnm_fonts serves a file contract and a library contract. This repository uses
 # only the first: VNM_FONTS_DIRECTORY names the verbatim files, and the library
@@ -45,7 +46,7 @@ if(NOT VNM_FONTS_DIRECTORY)
   FetchContent_MakeAvailable(vnm_fonts)
 endif()
 
-set(VNM_MSDF_TEXT_FONT_FILE "${VNM_FONTS_DIRECTORY}/UbuntuMono-Bront.ttf")
+set(VNM_MSDF_TEXT_FONT_FILE "${VNM_FONTS_DIRECTORY}/UbuntuSansMonoDerivativeVnm-Regular.ttf")
 
 if(NOT EXISTS "${VNM_MSDF_TEXT_FONT_FILE}")
   message(FATAL_ERROR
