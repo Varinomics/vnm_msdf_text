@@ -30,10 +30,6 @@ correctness and small API cleanup batches.
 
 ## Fonts And Coverage
 
-- Decide whether the bundled font is only a test fixture or a supported
-  default. It does not cover the full `default_codepoints()` set.
-- If a supported default font is desired, either narrow `default_codepoints()`
-  to that font's coverage or bundle/document a font with matching coverage.
 - Add a small purpose-built test font if future tests need exact coverage
   guarantees beyond the current dynamic missing-codepoint probe.
 
@@ -50,6 +46,3 @@ correctness and small API cleanup batches.
 - Consider respecting `BUILD_SHARED_LIBS` instead of forcing a static library.
 - Prefer release archives with hashes over Git fetches if reproducibility or
   locked-down build environments become a requirement.
-- Revisit install/export behavior if the library is packaged independently.
-  The current export intentionally depends on whether dependencies are imported
-  package targets or locally built targets.
