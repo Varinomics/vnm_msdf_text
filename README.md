@@ -447,7 +447,7 @@ The tests bake their atlases from a font that lives in
 that repository. A tree that has already added vnm_fonts has published the
 verbatim files in `VNM_FONTS_DIRECTORY`, and that is used as it stands;
 otherwise a checkout beside this one is used when it exists and CMake fetches
-`master` when it does not, and `VNM_MSDF_TEXT_VNM_FONTS_SOURCE_DIR` overrides
+`master` when it does not, and `FETCHCONTENT_SOURCE_DIR_VNM_FONTS` overrides
 that pair.
 
 Only the file contract is used. vnm_fonts configures without Qt and publishes
