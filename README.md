@@ -194,12 +194,11 @@ entry and fail its own configure instead of linking a build without it. The
 component requires C++20, Qt 6.7 or newer, and Qt Shader Tools at build time
 only.
 
-It is a source-tree target, consumed through `add_subdirectory` or
-`FetchContent` and linked as `vnm_msdf_text::rhi`. It is not part of the
-installed package: the installed tree contains neither an RHI target nor the
-`vnm_msdf_text/rhi/` headers, and `find_package(vnm_msdf_text COMPONENTS rhi)`
-is rejected as an unsupported component. Installing headers a package cannot
-satisfy would be a contract the package does not have.
+Consume `vnm_msdf_text::rhi` through `add_subdirectory`, `FetchContent`, or
+`find_package(vnm_msdf_text CONFIG REQUIRED COMPONENTS rhi)`. An installation
+built with RHI enabled and find-package-able atlas dependencies exports its
+headers, static library and shader resource objects. Qt is resolved only when
+a Qt component is requested; dependency-light LCD clients need no Qt.
 
 Public headers live under `vnm_msdf_text/rhi/` and everything is in namespace
 `vnm::msdf_text::rhi`. The public headers only forward-declare the QRhi types
@@ -225,8 +224,7 @@ A snapshot exposes the CPU data it was built from rather than restating it:
 bounds, positioned glyphs, and quad emission are the existing free functions in
 `msdf_text.h` applied to those two values, so there is one set of metrics.
 
-`identity()` is a digest of every input that determines the bake: the font
-bytes, the draw pixel height, the atlas options, and the requested codepoints.
+`identity()` is a digest of the complete drawable atlas content and draw size.
 Two snapshots with equal identity measure identically and emit identical quads,
 so a consumer can key cached CPU measurements or a presentation key on it and
 keep them across a rebuild.
@@ -238,7 +236,22 @@ of this static library; two modules that each link it count independently, so a
 revision compares snapshots from one producer and does not identify a snapshot
 across a module boundary. Compare content with `identity()`, and decide whether
 a device resource built from a snapshot can be reused from the retained snapshot
-object, which is what `Text_renderer` does.
+object. `Text_renderer` retains the immutable `Baked_font` instead of the
+draw-size snapshot, so changing draw size can reuse the uploaded bitmap.
+
+`build_baked_font()` produces that shared owner, and `make_font_snapshot()`
+creates inexpensive draw-size views over it. `adopt_baked_font()` validates a
+complete cached build result and derives its identity from the actual data.
+Cache owners retain status and coverage diagnostics, include the producer's
+`k_font_bake_compatibility_version` in their key, and retain ownership of disk
+locations, size budgets and eviction. Invalid cached data is rejected.
+
+The optional `qt_lcd` component resolves display subpixel order from `QScreen`
+and the shared LCD request type. Enable `VNM_MSDF_TEXT_BUILD_QT_LCD` for source
+builds or request the installed `qt_lcd` component. A resolver-only source build
+may set `VNM_MSDF_TEXT_BUILD_ATLAS=OFF`; RHI requires the atlas component.
+`VNM_MSDF_TEXT_SHADER_DIR` identifies the shared `lcd_filter.glsl` include for
+source and installed shader consumers.
 
 ### Batches and draw states
 

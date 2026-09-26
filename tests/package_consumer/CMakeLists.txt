@@ -54,17 +54,19 @@ if(NOT TARGET vnm_msdf_text::lcd_contract OR
   message(FATAL_ERROR "the installed package must import both dependency-light targets")
 endif()
 
-# The QRhi component is a source-tree target with no installed artifact behind
-# it. A consumer of the installed package must not be able to reach it through
-# an imported target or through a header the package cannot satisfy.
+# Dependency-light requests must not import optional Qt components.
 if(TARGET vnm_msdf_text::rhi)
   message(FATAL_ERROR "the installed package must not import an rhi target")
 endif()
-if(EXISTS "${VNM_MSDF_TEXT_PACKAGE_PREFIX}/include/vnm_msdf_text/rhi")
-  message(FATAL_ERROR "the installed include tree must not carry rhi headers")
-endif()
 
+option(VNM_MSDF_TEXT_TEST_RHI "Exercise the installed RHI component" OFF)
 enable_testing()
+if(VNM_MSDF_TEXT_TEST_RHI)
+  find_package(vnm_msdf_text CONFIG REQUIRED COMPONENTS rhi)
+  add_executable(rhi_consumer rhi_consumer.cpp)
+  target_link_libraries(rhi_consumer PRIVATE vnm_msdf_text::rhi Qt6::GuiPrivate)
+  add_test(NAME rhi_consumer COMMAND rhi_consumer)
+endif()
 
 add_executable(lcd_contract_consumer lcd_contract_consumer.cpp)
 target_link_libraries(lcd_contract_consumer PRIVATE vnm_msdf_text::lcd_contract)

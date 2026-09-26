@@ -40,6 +40,13 @@ inline constexpr std::uint32_t k_lcd_style_version    = 1;
 inline constexpr std::uint32_t k_glow_style_version   = 1;
 /// True-SDF alpha masking of the multi-channel coverage.
 inline constexpr std::uint32_t k_sdf_mask_version     = 1;
+/// Record all glow draws before foreground draws within a requested slice.
+inline constexpr std::uint32_t k_grouped_shadows_version = 1;
+
+struct grouped_shadows_t
+{
+    std::uint32_t version = k_grouped_shadows_version;
+};
 
 /**
  * @brief One glyph quad's rectangle in the space its vertices are laid out in.

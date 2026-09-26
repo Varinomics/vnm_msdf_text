@@ -44,12 +44,29 @@ constexpr float shader_uniform_value(Resolved_lcd_subpixel_order order);
 casts fail closed: `is_display_specific` returns `false`,
 `resolved_order_value` returns `0`, and `shader_uniform_value` returns `0.0f`.
 
-Product request policy such as automatic detection remains consumer-owned.
+`lcd_request_t` distinguishes automatic detection from an explicit resolved
+order. `Lcd_subpixel_order_policy` is its integer-facing policy vocabulary
+(`AUTO`, `NONE`, `RGB`, `BGR`, `VRGB`, `VBGR`); `lcd_request_from_policy`
+converts that vocabulary without treating `AUTO` as a renderable order.
+
+The optional `vnm_msdf_text::qt_lcd` component resolves requests for a Qt screen
+or window on the GUI thread. Explicit orders require no screen. Automatic
+resolution uses Qt hints and monitor-specific Windows layout and physical
+rotation, failing closed when the display cannot be identified. A flat or
+invalid monitor layout disables LCD; an absent override uses Windows font
+smoothing settings only when ClearType is enabled. Consumers cache the result
+for their display context and refresh it when screens, geometry, device scale,
+or native display settings change. `observe_lcd_settings` supplies the native
+Windows settings notification hook.
 
 ## Shader Reference Data
 
-The shader-reference component exposes reference data for consumer-owned drift
-checks. It does not define a shared renderer or shader source.
+The shader-reference component exposes reference data for drift checks. The
+installed `share/vnm_msdf_text/shaders/lcd_filter.glsl` asset supplies the shared
+seven-sample LCD filter used by styled text, plot grids, and instanced terminal
+text. `VNM_MSDF_TEXT_SHADER_DIR` locates that asset for source or installed
+consumers. Geometry, sample production, and eligibility remain renderer-specific;
+the optional `rhi` component owns the shared styled text pipeline.
 
 The reference data includes:
 

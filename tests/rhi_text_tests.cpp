@@ -11,8 +11,6 @@
 #include <rhi/qshader.h>
 
 #include <QtCore/QByteArray>
-#include <QtCore/QByteArrayView>
-#include <QtCore/QCryptographicHash>
 #include <QtCore/QFile>
 #include <QtGui/QColor>
 #include <QtGui/QGuiApplication>
@@ -170,91 +168,49 @@ const mtr::Font_snapshot& shared_snapshot()
     return *s_snapshot;
 }
 
-std::string hex(std::span<const std::uint8_t> bytes)
-{
-    static constexpr char k_digits[] = "0123456789abcdef";
-
-    std::string out;
-    out.reserve(bytes.size() * 2u);
-    for (std::uint8_t byte : bytes) {
-        out.push_back(k_digits[(byte >> 4) & 0x0Fu]);
-        out.push_back(k_digits[byte & 0x0Fu]);
-    }
-    return out;
-}
-
 // -----------------------------------------------------------------------------
 // Font snapshot: build status, identity, and revision
 // -----------------------------------------------------------------------------
 
-void expected_u32(QCryptographicHash& hash, std::uint32_t value)
+bool test_shared_bake_and_restored_identity()
 {
-    const char bytes[4] = {
-        static_cast<char>((value >> 24) & 0xFFu),
-        static_cast<char>((value >> 16) & 0xFFu),
-        static_cast<char>((value >>  8) & 0xFFu),
-        static_cast<char>( value        & 0xFFu),
-    };
-    hash.addData(QByteArrayView(bytes, sizeof(bytes)));
-}
-
-void expected_f32(QCryptographicHash& hash, float value)
-{
-    std::uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    expected_u32(hash, bits);
-}
-
-void expected_f64(QCryptographicHash& hash, double value)
-{
-    std::uint64_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    expected_u32(hash, static_cast<std::uint32_t>(bits >> 32));
-    expected_u32(hash, static_cast<std::uint32_t>(bits & 0xFFFFFFFFu));
-}
-
-// The identity is a SHA-256 over a fixed serialization of the build inputs.
-// Rebuilding that byte stream here from the documented order pins the contract:
-// a field dropped, reordered, or written at another width changes the digest,
-// and so does swapping the digest for something that is not SHA-256.
-bool test_identity_is_the_serialized_build_inputs()
-{
-    const msdf::options_t       options    = snapshot_options();
-    const std::vector<char32_t> codepoints = covered_codepoints();
-
     const mtr::font_snapshot_result_t built = build_sample_snapshot();
     if (!check(built.snapshot != nullptr, "the sample snapshot must build")) {
         return false;
     }
-
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(QByteArrayView(
-        reinterpret_cast<const char*>(test_font().data()),
-        static_cast<qsizetype>(test_font().size())));
-    expected_u32(hash, static_cast<std::uint32_t>(test_font().size()));
-    expected_u32(hash, static_cast<std::uint32_t>(k_draw_pixel_height));
-
-    expected_u32(hash, static_cast<std::uint32_t>(options.atlas_size));
-    expected_f64(hash, options.min_atlas_font_size);
-    expected_f32(hash, options.atlas_px_range);
-    expected_f32(hash, options.sharpness_bias);
-    expected_u32(hash, static_cast<std::uint32_t>(options.atlas_gutter_px));
-    expected_u32(hash, options.build_kerning_table ? 1u : 0u);
-    expected_u32(hash, static_cast<std::uint32_t>(options.missing_glyph_policy));
-
-    expected_u32(hash, static_cast<std::uint32_t>(codepoints.size()));
-    for (char32_t codepoint : codepoints) {
-        expected_u32(hash, static_cast<std::uint32_t>(codepoint));
+    const auto& font = built.snapshot->baked_font();
+    const auto smaller = mtr::make_font_snapshot(font, k_draw_pixel_height / 2);
+    const auto same = mtr::make_font_snapshot(font, k_draw_pixel_height);
+    bool ok = check(smaller.snapshot && same.snapshot, "draw-size views must be usable");
+    if (!ok) {
+        return false;
     }
+    ok &= check(&smaller.snapshot->atlas() == &built.snapshot->atlas(),
+        "draw sizes must share atlas storage");
+    ok &= check(smaller.snapshot->identity() != built.snapshot->identity(),
+        "different draw sizes must invalidate layout identity");
+    ok &= check(same.snapshot->identity() == built.snapshot->identity(),
+        "equal atlas and draw size must retain layout identity");
 
-    const QByteArray expected = hash.result();
-    const std::string expected_hex = hex(std::span<const std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(expected.constData()),
-        static_cast<std::size_t>(expected.size())));
+    auto restored = mtr::adopt_baked_font(font->build_result());
+    ok &= check(restored.font && restored.font->identity() == font->identity(),
+        "restoring the complete result must retain atlas content identity");
+    auto changed = font->build_result();
+    changed.atlas.rgba[0] ^= 1u;
+    auto altered = mtr::adopt_baked_font(std::move(changed));
+    ok &= check(altered.font && altered.font->identity() != font->identity(),
+        "different bitmap bytes cannot reuse a claimed atlas identity");
 
-    return check(
-        hex(built.snapshot->identity().digest) == expected_hex,
-        "the identity must be SHA-256 over the documented build-input serialization");
+    auto malformed = font->build_result();
+    malformed.atlas.rgba.pop_back();
+    ok &= check(mtr::adopt_baked_font(std::move(malformed)).result.status ==
+        mtr::Text_status::INVALID_ARGUMENT, "truncated cached atlas must be rejected");
+    malformed = font->build_result();
+    malformed.status = msdf::Build_status::SUCCESS;
+    malformed.missing_codepoints.push_back(U'\u2603');
+    ok &= check(mtr::adopt_baked_font(std::move(malformed)).result.status ==
+        mtr::Text_status::INVALID_ARGUMENT, "cached status must agree with coverage diagnostics");
+    return ok;
 }
 
 bool test_snapshot_rejects_invalid_arguments()
@@ -324,6 +280,12 @@ bool test_snapshot_reports_partial_build()
     ok &= check(
         !partial.snapshot->atlas().glyphs.empty(),
         "a partial build must still carry renderable glyphs");
+    const auto restored = mtr::adopt_baked_font(build);
+    ok &= check(restored.font &&
+        restored.font->build_result().status == build.status &&
+        restored.font->build_result().missing_codepoints == build.missing_codepoints &&
+        restored.font->build_result().message == build.message,
+        "a cache round-trip must retain partial coverage and diagnostics");
     return ok;
 }
 
@@ -2977,6 +2939,79 @@ bool test_null_mixed_paths_record_in_queue_order()
     return ok;
 }
 
+bool test_null_cursor_ranges_group_shadows_and_rebind()
+{
+    auto rhi = make_null_rhi();
+    if (!check(rhi != nullptr, "the Null backend must be available")) {
+        return false;
+    }
+    Offscreen_target offscreen(*rhi, QSize(320, 64), 1);
+    const auto held = build_sample_snapshot();
+    if (!check(offscreen.valid() && held.snapshot != nullptr, "the range fixture must build")) {
+        return false;
+    }
+    mtr::Text_renderer renderer;
+    renderer.set_font(held.snapshot);
+    mtr::Text_batch batch;
+    bool ok = build_sample_batch(*held.snapshot, true, batch);
+    QRhiCommandBuffer* cb = nullptr;
+    ok &= check(rhi->beginOffscreenFrame(&cb) == QRhi::FrameOpSuccess, "the frame must begin");
+    mtr::frame_t frame{rhi.get(), cb, offscreen.target(), rhi->nextResourceUpdateBatch()};
+    mtr::draw_state_t glow;
+    glow.transform = mtr::pixel_ortho_transform(frame);
+    glow.glow = visible_glow();
+    renderer.begin_frame();
+    ok &= check_status(renderer.queue(batch, {}), mtr::Text_status::OK, "base queues first");
+    ok &= check_status(renderer.queue(batch, glow), mtr::Text_status::OK, "glow queues second");
+    const auto boundary = renderer.queued_draw_count();
+    ok &= check(boundary == 3, "a boundary counts both glow and foreground");
+    ok &= check_status(renderer.queue(batch, glow), mtr::Text_status::OK, "the next slice queues");
+    ok &= check_status(renderer.prepare(frame), mtr::Text_status::OK, "all slices prepare together");
+    cb->beginPass(frame.render_target, QColor(0, 0, 0, 0), {1.0f, 0}, frame.resource_updates);
+    cb->setViewport(QRhiViewport(0, 0, 320, 64));
+    mtr::grouped_shadows_t unsupported;
+    unsupported.version += 1;
+    ok &= check_status(renderer.record_draws(frame, boundary, unsupported),
+        mtr::Text_status::CAPABILITY_UNSUPPORTED, "unknown grouping is rejected locally");
+    ok &= check_status(renderer.record_draws(frame, boundary, mtr::grouped_shadows_t{}),
+        mtr::Text_status::OK, "the first slice records grouped shadows");
+    auto diagnostics = renderer.diagnostics();
+    // Shadow (styled), base foreground, styled foreground: grouping must move
+    // the shadow ahead of the earlier base draw, requiring three bindings.
+    ok &= check(diagnostics.recorded_draws == 3 && diagnostics.recorded_pipeline_binds == 3,
+        "grouping records every shadow before the slice's foregrounds");
+    ok &= check(renderer.queued_draw_count() == 5, "a slice retains frame geometry");
+    ok &= check_status(renderer.record_draws(frame, 0), mtr::Text_status::OK,
+        "a boundary behind the cursor is a no-op");
+    ok &= check_status(renderer.record_draws(frame, 999, mtr::grouped_shadows_t{}),
+        mtr::Text_status::OK, "the final slice clamps its boundary");
+    diagnostics = renderer.diagnostics();
+    ok &= check(diagnostics.recorded_draws == 5 && diagnostics.recorded_pipeline_binds == 4,
+        "the next slice rebinds even when its pipeline matches the previous draw");
+    ok &= check_status(renderer.record(frame), mtr::Text_status::OK, "record drains and resets");
+    ok &= check(renderer.queued_draw_count() == 0 && renderer.diagnostics().recorded_draws == 5,
+        "draining an exhausted cursor does not duplicate draws");
+    cb->endPass();
+    rhi->endOffscreenFrame();
+    const auto uploaded = renderer.diagnostics().atlas_upload_enqueues;
+    const auto resized = mtr::make_font_snapshot(
+        held.snapshot->baked_font(), held.snapshot->draw_pixel_height() + 3);
+    ok &= check(resized.snapshot != nullptr, "a second draw-size view must build");
+    if (resized.snapshot) {
+        renderer.set_font(resized.snapshot);
+        mtr::Text_batch resized_batch;
+        ok &= build_sample_batch(*resized.snapshot, false, resized_batch);
+        mtr::text_result_t prepared;
+        ok &= check_status(run_null_frame(*rhi, offscreen, renderer, resized_batch, {}, prepared),
+            mtr::Text_status::OK, "the resized view must record");
+        ok &= check_status(prepared, mtr::Text_status::OK, "the resized view must prepare");
+        ok &= check(renderer.diagnostics().atlas_upload_enqueues == uploaded,
+            "changing draw size over the same baked font must reuse the GPU atlas");
+    }
+    renderer.release_resources();
+    return ok;
+}
+
 bool test_shader_artifacts_cover_every_required_profile()
 {
     struct profile_t
@@ -3063,7 +3098,7 @@ int main(int argc, char** argv)
     QGuiApplication app(argc, argv);
 
     bool ok = true;
-    ok &= run_test("identity is the serialized build inputs", test_identity_is_the_serialized_build_inputs);
+    ok &= run_test("shared baked font and restored identity", test_shared_bake_and_restored_identity);
     ok &= run_test("snapshot rejects invalid arguments", test_snapshot_rejects_invalid_arguments);
     ok &= run_test("snapshot reports build failure", test_snapshot_reports_build_failure);
     ok &= run_test("snapshot reports partial build", test_snapshot_reports_partial_build);
@@ -3099,6 +3134,7 @@ int main(int argc, char** argv)
     ok &= run_test("null styled draws use their own resources", test_null_styled_draws_use_their_own_resources);
     ok &= run_test("null styled resources recreate and stay device local", test_null_styled_resources_recreate_and_stay_device_local);
     ok &= run_test("null mixed paths record in queue order", test_null_mixed_paths_record_in_queue_order);
+    ok &= run_test("null cursor ranges group shadows and rebind", test_null_cursor_ranges_group_shadows_and_rebind);
     ok &= run_test("shader artifacts cover every required profile", test_shader_artifacts_cover_every_required_profile);
     return ok ? 0 : 1;
 }
