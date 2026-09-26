@@ -165,13 +165,13 @@ struct renderer_diagnostics_t
      */
     std::size_t   queued_draws   = 0;
     std::size_t   queued_indices = 0;
-    /// Draws issued by the most recent record(); survives the frame reset.
+    /// Draws issued in the current frame; survives reset until begin_frame().
     std::size_t   recorded_draws = 0;
     /**
-     * @brief Pipeline bindings the most recent record() issued.
+     * @brief Pipeline bindings issued in the current frame.
      *
      * One per run of consecutive draws on the same pipeline, so a frame of base
-     * text binds once and a frame that alternates paths binds once per change.
+     * text binds once per slice and alternating paths bind once per change.
      */
     std::size_t   recorded_pipeline_binds = 0;
 };
@@ -220,9 +220,9 @@ public:
      * batch laid out against the replacement is rejected until the next
      * begin_frame().
      *
-     * A different snapshot is uploaded by the next prepare() that draws it. The
-     * renderer keeps a reference to the snapshot whose bytes the atlas texture
-     * holds until it uploads another one, so the bytes an enqueued upload
+     * A different baked font is uploaded by the next prepare() that draws it;
+     * draw-size views of the same baked font reuse that upload. The renderer
+     * retains the baked font whose bytes the atlas texture holds, so an enqueued upload's bytes
      * refers to stay alive whether or not the host submits that frame.
      */
     void set_font(std::shared_ptr<const Font_snapshot> font);
@@ -310,6 +310,22 @@ public:
      * viewport stays as the host set it.
      */
     [[nodiscard]] text_result_t record(const frame_t& frame);
+
+    /// End boundary for record_draws(), counting glow and foreground separately.
+    [[nodiscard]] std::size_t queued_draw_count() const;
+
+    /**
+     * Records from the cursor to min(end, queued_draw_count()), then advances
+     * the cursor. Each call rebinds the pipeline so other renderers may record
+     * between slices. A grouped_shadows record moves all glows before all
+     * foregrounds within this slice; absence preserves queue order.
+     * prepare() must finish before the pass. This call retains frame geometry;
+     * record() drains the remaining draws and resets, or reset_frame() drops it.
+     * A failed call leaves the cursor unchanged.
+     */
+    [[nodiscard]] text_result_t record_draws(
+        const frame_t& frame, std::size_t end,
+        std::optional<grouped_shadows_t> grouped_shadows = std::nullopt);
 
     /// Drop the queued frame without recording it.
     void reset_frame();

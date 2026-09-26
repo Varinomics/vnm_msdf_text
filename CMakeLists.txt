@@ -32,14 +32,22 @@ option(VNM_MSDF_TEXT_FETCH_DEPS
 option(VNM_MSDF_TEXT_BUILD_TESTS
   "Build vnm_msdf_text tests"
   ${VNM_MSDF_TEXT_IS_TOP_LEVEL})
+option(VNM_MSDF_TEXT_BUILD_ATLAS "Build the CPU font atlas component" ON)
 option(VNM_MSDF_TEXT_BUILD_RHI
   "Build the opt-in Qt QRhi text component (vnm_msdf_text::rhi)"
+  OFF)
+option(VNM_MSDF_TEXT_BUILD_QT_LCD
+  "Build the opt-in Qt display LCD resolver (vnm_msdf_text::qt_lcd)"
   OFF)
 option(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN
   "Compile the fetched msdfgen distance-field kernel optimized in every configuration"
   ON)
 
 include(FetchContent)
+
+if(VNM_MSDF_TEXT_BUILD_RHI AND NOT VNM_MSDF_TEXT_BUILD_ATLAS)
+  message(FATAL_ERROR "The RHI text component requires VNM_MSDF_TEXT_BUILD_ATLAS=ON")
+endif()
 
 add_library(vnm_msdf_text_lcd_contract INTERFACE)
 add_library(vnm_msdf_text::lcd_contract ALIAS vnm_msdf_text_lcd_contract)
@@ -71,11 +79,16 @@ target_include_directories(vnm_msdf_text_lcd_shader_reference
 
 target_compile_features(vnm_msdf_text_lcd_shader_reference INTERFACE cxx_std_17)
 
+set(VNM_MSDF_TEXT_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+  CACHE INTERNAL "Shared MSDF shader include directory" FORCE)
+
 target_link_libraries(vnm_msdf_text_lcd_shader_reference
   INTERFACE
     vnm_msdf_text_lcd_contract
 )
 
+set(_vnm_msdf_text_export_ok FALSE)
+if(VNM_MSDF_TEXT_BUILD_ATLAS)
 if(DEFINED VNM_MSDF_TEXT_USE_SYSTEM_LIBS)
   message(STATUS
     "VNM_MSDF_TEXT_USE_SYSTEM_LIBS is deprecated. Use "
@@ -342,18 +355,42 @@ foreach(_dep IN ITEMS Freetype::Freetype msdfgen::msdfgen-core msdfgen::msdfgen-
     endif()
   endif()
 endforeach()
+endif() # VNM_MSDF_TEXT_BUILD_ATLAS
 set(VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT ${_vnm_msdf_text_export_ok})
+set(VNM_MSDF_TEXT_PACKAGE_HAS_RHI FALSE)
+if(VNM_MSDF_TEXT_BUILD_RHI AND _vnm_msdf_text_export_ok)
+  set(VNM_MSDF_TEXT_PACKAGE_HAS_RHI TRUE)
+endif()
 
 # -----------------------------------------------------------------------------
 # Opt-in QRhi text component
 #
 # Qt is located only inside this block. A CPU-only or editor-style consumer that
 # leaves VNM_MSDF_TEXT_BUILD_RHI OFF never runs find_package(Qt6), so it can
-# neither find nor link Qt through this project. The component is a source-tree
-# target: it is deliberately not part of the installed package export, because
-# an exported static library carrying Qt private headers and Qt resource objects
-# would promise an installed-consumer contract no consumer has adopted yet.
+# neither find nor link Qt through this project unless it requests qt_lcd.
+# Optional Qt components have separate exports, so dependency-light consumers
+# need neither Qt nor its private headers.
 # -----------------------------------------------------------------------------
+if(VNM_MSDF_TEXT_BUILD_QT_LCD)
+  find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui GuiPrivate)
+  add_library(vnm_msdf_text_qt_lcd STATIC src/qt/lcd_resolver.cpp)
+  add_library(vnm_msdf_text::qt_lcd ALIAS vnm_msdf_text_qt_lcd)
+  set_target_properties(vnm_msdf_text_qt_lcd PROPERTIES EXPORT_NAME qt_lcd POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(vnm_msdf_text_qt_lcd PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+  target_compile_features(vnm_msdf_text_qt_lcd PUBLIC cxx_std_17)
+  target_link_libraries(vnm_msdf_text_qt_lcd
+    PUBLIC vnm_msdf_text_lcd_contract Qt6::Core Qt6::Gui
+    PRIVATE Qt6::GuiPrivate)
+  if(WIN32)
+    target_link_libraries(vnm_msdf_text_qt_lcd PRIVATE user32)
+  endif()
+  if(VNM_MSDF_TEXT_BUILD_TESTS)
+    target_compile_definitions(vnm_msdf_text_qt_lcd PUBLIC VNM_MSDF_TEXT_ENABLE_TEST_HOOKS)
+  endif()
+endif()
+
 if(VNM_MSDF_TEXT_BUILD_RHI)
   find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui GuiPrivate ShaderTools)
 
@@ -378,6 +415,7 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
   target_include_directories(vnm_msdf_text_rhi
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:include>
   )
 
   target_compile_features(vnm_msdf_text_rhi PUBLIC cxx_std_20)
@@ -410,6 +448,7 @@ if(VNM_MSDF_TEXT_BUILD_RHI)
   # GL 3.3 and 4.1, HLSL 5.0, and Metal 1.2 and 2.1. ShaderTools is used here
   # only at build time; the component links no ShaderTools library.
   qt_add_shaders(vnm_msdf_text_rhi "vnm_msdf_text_rhi_shaders"
+    OUTPUT_TARGETS _vnm_msdf_text_rhi_resources
     PREFIX "/vnm_msdf_text"
     BASE   "${CMAKE_CURRENT_SOURCE_DIR}"
     GLSL   "300 es,330,410"
@@ -433,6 +472,7 @@ set(VNM_MSDF_TEXT_HAS_RHI ${VNM_MSDF_TEXT_BUILD_RHI}
 if(VNM_MSDF_TEXT_BUILD_TESTS)
   enable_testing()
 
+  if(VNM_MSDF_TEXT_BUILD_ATLAS)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/vnm_msdf_text_fonts.cmake)
 
   add_executable(vnm_msdf_text_tests
@@ -454,6 +494,17 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
   endif()
 
   add_test(NAME vnm_msdf_text_tests COMMAND vnm_msdf_text_tests)
+  endif()
+
+  if(VNM_MSDF_TEXT_BUILD_QT_LCD)
+    add_executable(vnm_msdf_text_qt_lcd_tests tests/qt_lcd_resolver_tests.cpp)
+    target_link_libraries(vnm_msdf_text_qt_lcd_tests PRIVATE vnm_msdf_text::qt_lcd)
+    add_test(NAME vnm_msdf_text_qt_lcd_tests COMMAND vnm_msdf_text_qt_lcd_tests)
+    if(WIN32)
+      set_tests_properties(vnm_msdf_text_qt_lcd_tests PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
+  endif()
 
   add_executable(vnm_msdf_text_lcd_contract_tests
     tests/lcd_contract_tests.cpp
@@ -608,6 +659,7 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
         "-DVNM_MSDF_TEXT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DVNM_MSDF_TEXT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
         "-DVNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT=${VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT}"
+        "-DVNM_MSDF_TEXT_PACKAGE_HAS_RHI=${VNM_MSDF_TEXT_PACKAGE_HAS_RHI}"
         "-DVNM_MSDF_TEXT_PROJECT_VERSION=${PROJECT_VERSION}"
         "-DVNM_MSDF_TEXT_TEST_CONFIG=$<CONFIG>"
         "-DVNM_TOOLCHAIN_CONTEXT=${CMAKE_CURRENT_BINARY_DIR}/nested-toolchain.cmake"
@@ -619,14 +671,34 @@ if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
   include(GNUInstallDirs)
   include(CMakePackageConfigHelpers)
 
-  # The QRhi component is not part of the installed export, so its headers stay
-  # out of the installed tree too. They are Qt-free and would compile against an
-  # installed package that has no library to satisfy them, which is a link error
-  # discovered by a consumer instead of a boundary stated by the package.
   install(DIRECTORY include/vnm_msdf_text
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     PATTERN "rhi" EXCLUDE
+    PATTERN "qt" EXCLUDE
   )
+  install(FILES shaders/lcd_filter.glsl DESTINATION ${CMAKE_INSTALL_DATADIR}/vnm_msdf_text/shaders)
+
+  set(VNM_MSDF_TEXT_PACKAGE_HAS_RHI FALSE)
+  if(VNM_MSDF_TEXT_BUILD_RHI AND _vnm_msdf_text_export_ok)
+    set(VNM_MSDF_TEXT_PACKAGE_HAS_RHI TRUE)
+    install(DIRECTORY include/vnm_msdf_text/rhi DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vnm_msdf_text)
+    install(TARGETS vnm_msdf_text_rhi ${_vnm_msdf_text_rhi_resources}
+      EXPORT vnm_msdf_textRhiTargets
+      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+      OBJECTS DESTINATION ${CMAKE_INSTALL_LIBDIR}/vnm_msdf_text
+      INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(EXPORT vnm_msdf_textRhiTargets NAMESPACE vnm_msdf_text::
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text)
+  endif()
+  set(VNM_MSDF_TEXT_PACKAGE_HAS_QT_LCD ${VNM_MSDF_TEXT_BUILD_QT_LCD})
+  if(VNM_MSDF_TEXT_BUILD_QT_LCD)
+    install(DIRECTORY include/vnm_msdf_text/qt DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vnm_msdf_text)
+    install(TARGETS vnm_msdf_text_qt_lcd EXPORT vnm_msdf_textQtLcdTargets
+      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+      INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(EXPORT vnm_msdf_textQtLcdTargets NAMESPACE vnm_msdf_text::
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vnm_msdf_text)
+  endif()
   install(FILES
     LICENSE.txt
     README.md
@@ -653,7 +725,7 @@ if(VNM_MSDF_TEXT_IS_TOP_LEVEL)
       INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
 
-  else()
+  elseif(VNM_MSDF_TEXT_BUILD_ATLAS)
     set(VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT FALSE)
 
     message(STATUS

@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstddef>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -276,7 +277,13 @@ bool test_styled_shader_binds_the_reference_filter()
     if (!check(!shader.empty(), "the styled fragment shader source must be readable")) {
         return false;
     }
-    const token_list_t tokens = tokenize_glsl(shader);
+    const auto filter_path = std::filesystem::path(VNM_MSDF_TEXT_STYLED_FRAG_PATH)
+        .parent_path().parent_path() / "lcd_filter.glsl";
+    const std::string filter = read_text_file(filter_path.string().c_str());
+    if (!check(!filter.empty(), "the shared LCD filter source must be readable")) {
+        return false;
+    }
+    const token_list_t tokens = tokenize_glsl(shader + filter);
 
     bool ok = true;
     for (const ref::decode_threshold_t& threshold : ref::k_lcd_decode_thresholds) {

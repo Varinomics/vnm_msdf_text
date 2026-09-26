@@ -197,6 +197,7 @@ struct draw_op_t
     std::size_t  uniform_index  = 0;
     quint32      uniform_offset = 0;
     clip_rect_t  clip;
+    bool         shadow = false;
 };
 
 [[nodiscard]] bool is_unit_interval_color(const std::array<float, 4>& color)
@@ -333,16 +334,13 @@ struct Text_renderer::Impl
     // this, so replacing font mid-frame cannot change work already queued.
     std::shared_ptr<const Font_snapshot> frame_font;
 
-    // The snapshot whose bytes the atlas texture holds. Reuse is keyed on this
-    // retained object rather than on a counter: the renderer owns a reference
-    // to it, so no other live snapshot can share its address, and a snapshot is
-    // immutable once built.
-    std::shared_ptr<const Font_snapshot> committed_atlas;
+    // Draw-size snapshots share one immutable baked owner and GPU upload.
+    std::shared_ptr<const Baked_font> committed_atlas;
 
-    // The snapshot of an upload that has been put into a host batch but whose
+    // The baked owner of an upload put into a host batch but whose
     // submission this renderer has not seen yet. Retaining it keeps the bytes
     // that upload refers to alive for as long as the host may still submit it.
-    std::shared_ptr<const Font_snapshot> outstanding_atlas;
+    std::shared_ptr<const Baked_font> outstanding_atlas;
     bool                                 atlas_enqueued_this_frame = false;
 
     std::vector<text_vertex_t>   vertices;
@@ -358,6 +356,7 @@ struct Text_renderer::Impl
     // One list in queue order, so a styled draw composes over the base text
     // queued before it and under the base text queued after it.
     std::vector<draw_op_t> draws;
+    std::size_t draw_cursor = 0;
 
     QRhi*                                       rhi = nullptr;
     std::unique_ptr<QRhiTexture>                atlas_texture;
@@ -421,6 +420,7 @@ struct Text_renderer::Impl
         styled_indices.clear();
         styled_uniforms.clear();
         draws.clear();
+        draw_cursor = 0;
         frame_font.reset();
         atlas_enqueued_this_frame = false;
         prepared                  = false;
@@ -486,12 +486,12 @@ struct Text_renderer::Impl
         // carries a sized bitmap with at least one glyph.
         const atlas_t& atlas = snapshot->atlas();
 
-        if (atlas_texture && committed_atlas == snapshot) {
+        if (atlas_texture && committed_atlas == snapshot->baked_font() && !outstanding_atlas) {
             return {};
         }
         // One enqueue per frame is enough: a second prepare() on the same frame
         // would only overwrite the same command in the same batch.
-        if (atlas_enqueued_this_frame && outstanding_atlas == snapshot) {
+        if (atlas_enqueued_this_frame && outstanding_atlas == snapshot->baked_font()) {
             return {};
         }
 
@@ -523,7 +523,7 @@ struct Text_renderer::Impl
             QImage::Format_RGBA8888);
         updates->uploadTexture(atlas_texture.get(), image);
 
-        outstanding_atlas         = snapshot;
+        outstanding_atlas         = snapshot->baked_font();
         atlas_enqueued_this_frame = true;
         ++atlas_upload_enqueues;
         return {};
@@ -982,6 +982,8 @@ const std::shared_ptr<const Font_snapshot>& Text_renderer::font() const
 void Text_renderer::begin_frame()
 {
     d->clear_frame();
+    d->recorded_draws = 0;
+    d->recorded_pipeline_binds = 0;
 }
 
 text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& state)
@@ -1150,6 +1152,7 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
         glow_block.glow_radius = state.glow->radius_px;
 
         draw_op_t glow_op     = op;
+        glow_op.shadow = true;
         glow_op.uniform_index = d->styled_uniforms.size();
         d->styled_uniforms.push_back(glow_block);
         d->draws.push_back(glow_op);
@@ -1256,11 +1259,27 @@ text_result_t Text_renderer::prepare(const frame_t& frame)
 
 text_result_t Text_renderer::record(const frame_t& frame)
 {
-    d->recorded_draws          = 0;
-    d->recorded_pipeline_binds = 0;
+    const text_result_t result = record_draws(frame, d->draws.size());
+    d->clear_frame();
+    return result;
+}
+
+std::size_t Text_renderer::queued_draw_count() const
+{
+    return d->draws.size();
+}
+
+text_result_t Text_renderer::record_draws(
+    const frame_t& frame, std::size_t end,
+    std::optional<grouped_shadows_t> grouped_shadows)
+{
+    if (grouped_shadows && grouped_shadows->version != k_grouped_shadows_version) {
+        return detail::make_text_result(
+            Text_status::CAPABILITY_UNSUPPORTED,
+            "this build does not implement the requested grouped shadows version");
+    }
 
     if (!frame.command_buffer || !frame.render_target) {
-        d->clear_frame();
         return detail::make_text_result(
             Text_status::INVALID_FRAME,
             "text recording needs a command buffer and a render target");
@@ -1274,7 +1293,6 @@ text_result_t Text_renderer::record(const frame_t& frame)
     d->settle_outstanding_atlas();
 
     if (d->draws.empty()) {
-        d->clear_frame();
         return {};
     }
 
@@ -1286,7 +1304,6 @@ text_result_t Text_renderer::record(const frame_t& frame)
         (d->styled_pipeline && d->styled_srb &&
          d->styled_vertex_buffer && d->styled_index_buffer);
     if (!d->prepared || !base_ready || !styled_ready) {
-        d->clear_frame();
         return detail::make_text_result(
             Text_status::NOT_PREPARED,
             "queued text was never uploaded, so it cannot be recorded");
@@ -1298,8 +1315,8 @@ text_result_t Text_renderer::record(const frame_t& frame)
     bool               bound         = false;
     Draw_variant       bound_variant = Draw_variant::BASE;
 
-    // queue() refuses an empty batch, so every queued draw has geometry.
-    for (const draw_op_t& op : d->draws) {
+    const std::size_t range_end = std::min(end, d->draws.size());
+    const auto record_op = [&](const draw_op_t& op) {
         if (!bound || bound_variant != op.variant) {
             const bool styled = op.variant == Draw_variant::STYLED;
             cb->setGraphicsPipeline(styled ? d->styled_pipeline.get() : d->pipeline.get());
@@ -1330,9 +1347,22 @@ text_result_t Text_renderer::record(const frame_t& frame)
 
         cb->drawIndexed(op.index_count, 1, op.index_start, 0, 0);
         ++d->recorded_draws;
+    };
+    if (grouped_shadows) {
+        for (bool shadow : {true, false}) {
+            for (std::size_t i = d->draw_cursor; i < range_end; ++i) {
+                if (d->draws[i].shadow == shadow) {
+                    record_op(d->draws[i]);
+                }
+            }
+        }
     }
-
-    d->clear_frame();
+    else {
+        for (std::size_t i = d->draw_cursor; i < range_end; ++i) {
+            record_op(d->draws[i]);
+        }
+    }
+    d->draw_cursor = std::max(d->draw_cursor, range_end);
     return {};
 }
 

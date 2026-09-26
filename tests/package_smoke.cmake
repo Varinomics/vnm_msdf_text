@@ -77,32 +77,14 @@ if(NOT _install_result EQUAL 0)
     "${_install_output}\n${_install_error}")
 endif()
 
-# The QRhi component is a source-tree target with no installed artifact behind
-# it, so the installed tree must not carry its headers either: a readable public
-# header that no configuration of this package can link is a contract the
-# package does not have.
-if(EXISTS "${_install_prefix}/include/vnm_msdf_text/rhi")
-  message(FATAL_ERROR
-    "The installed package must not contain vnm_msdf_text/rhi headers, because "
-    "no installed artifact provides the component that satisfies them.")
-endif()
-file(GLOB_RECURSE _installed_rhi_headers
-  "${_install_prefix}/include/vnm_msdf_text/rhi*")
-if(_installed_rhi_headers)
-  message(FATAL_ERROR
-    "The installed package contains unsupported RHI headers: ${_installed_rhi_headers}")
-endif()
-
-file(GLOB _installed_target_files
-  "${_install_prefix}/lib/cmake/vnm_msdf_text/vnm_msdf_textTargets*.cmake")
-foreach(_target_file IN LISTS _installed_target_files)
-  file(READ "${_target_file}" _target_file_text)
-  string(FIND "${_target_file_text}" "vnm_msdf_text::rhi" _rhi_target_index)
-  if(NOT _rhi_target_index EQUAL -1)
-    message(FATAL_ERROR
-      "The installed export must not define vnm_msdf_text::rhi (${_target_file}).")
+if(VNM_MSDF_TEXT_PACKAGE_HAS_RHI)
+  if(NOT EXISTS "${_install_prefix}/include/vnm_msdf_text/rhi/text_renderer.h" OR
+     NOT EXISTS "${_install_prefix}/lib/cmake/vnm_msdf_text/vnm_msdf_textRhiTargets.cmake")
+    message(FATAL_ERROR "RHI package must install both its headers and target export")
   endif()
-endforeach()
+elseif(EXISTS "${_install_prefix}/include/vnm_msdf_text/rhi")
+  message(FATAL_ERROR "Unavailable RHI component must not install unusable headers")
+endif()
 
 # Keeps this gate compiler-free by construction rather than by convention: a
 # consumer added here later cannot quietly reintroduce compiler detection or a
@@ -266,18 +248,6 @@ if(NOT TARGET vnm_msdf_text::lcd_contract)
     "accepted exact-current request must import lcd_contract")
 endif()
 
-find_package(vnm_msdf_text ${VNM_MSDF_TEXT_CURRENT_VERSION} EXACT
-  CONFIG QUIET COMPONENTS rhi
-  PATHS "${VNM_MSDF_TEXT_PACKAGE_PREFIX}"
-  NO_DEFAULT_PATH)
-if(vnm_msdf_text_rhi_FOUND)
-  message(FATAL_ERROR
-    "the installed package must not report an rhi component")
-endif()
-if(TARGET vnm_msdf_text::rhi)
-  message(FATAL_ERROR
-    "the installed package must not import an rhi target")
-endif()
 ]=])
 
 set(_no_component_cmake [=[
@@ -311,9 +281,6 @@ if(NOT TARGET vnm_msdf_text::lcd_shader_reference)
 endif()
 if(TARGET vnm_msdf_text::rhi)
   message(FATAL_ERROR "installed package must not export an rhi target")
-endif()
-if(EXISTS "${vnm_msdf_text_DIR}/../../../include/vnm_msdf_text/rhi")
-  message(FATAL_ERROR "installed include tree must not carry rhi headers")
 endif()
 ]=])
 

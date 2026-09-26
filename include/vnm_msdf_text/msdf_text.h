@@ -12,6 +12,11 @@
 namespace vnm {
 namespace msdf_text {
 
+// Persisted atlas caches include this producer-owned compatibility identity in
+// their key. Change it when baking or atlas interpretation changes, independently
+// of optional renderer capabilities and consumer disk-container formats.
+inline constexpr std::uint32_t k_font_bake_compatibility_version = 1;
+
 /**
  * @brief Per-codepoint layout data in scale-independent font units and atlas UVs.
  *
