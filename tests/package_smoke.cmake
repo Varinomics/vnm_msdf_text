@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
+include("${VNM_TOOLCHAIN_CONTEXT}")
 
 # Installs the project and inspects the package it produced: which components
 # resolve, which versions are accepted, which dependencies a component needs,
@@ -139,20 +140,12 @@ function(vnm_msdf_text_consumer_configure_command out_var consumer_source_dir co
     -DCMAKE_FIND_USE_PACKAGE_REGISTRY=FALSE
     -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE)
 
-  if(DEFINED VNM_MSDF_TEXT_TEST_GENERATOR AND
-     NOT VNM_MSDF_TEXT_TEST_GENERATOR STREQUAL "")
-    list(APPEND _command -G "${VNM_MSDF_TEXT_TEST_GENERATOR}")
-  endif()
-  if(DEFINED VNM_MSDF_TEXT_TEST_MAKE_PROGRAM AND
-     NOT VNM_MSDF_TEXT_TEST_MAKE_PROGRAM STREQUAL "")
-    list(APPEND _command
-      "-DCMAKE_MAKE_PROGRAM=${VNM_MSDF_TEXT_TEST_MAKE_PROGRAM}")
-  endif()
+  vnm_append_toolchain_args(_command LANGUAGES NONE)
   if(_consumer_EXTRA_ARGS)
     list(APPEND _command ${_consumer_EXTRA_ARGS})
   endif()
 
-  set(${out_var} ${_command} PARENT_SCOPE)
+  set(${out_var} "${_command}" PARENT_SCOPE)
 endfunction()
 
 function(vnm_msdf_text_inspect_package name cmake_var)

@@ -600,6 +600,8 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
     # actually compile and link is proven by tests/package_consumer, which is
     # configured and built as a project of its own for the same reason
     # tests/source_consumer is.
+    include("${PROJECT_SOURCE_DIR}/cmake/vnm_cmake_dependency.cmake")
+    vnm_write_toolchain_context("${CMAKE_CURRENT_BINARY_DIR}/nested-toolchain.cmake")
     add_test(
       NAME vnm_msdf_text_package_smoke
       COMMAND ${CMAKE_COMMAND}
@@ -608,8 +610,7 @@ if(VNM_MSDF_TEXT_BUILD_TESTS)
         "-DVNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT=${VNM_MSDF_TEXT_PACKAGE_HAS_ATLAS_EXPORT}"
         "-DVNM_MSDF_TEXT_PROJECT_VERSION=${PROJECT_VERSION}"
         "-DVNM_MSDF_TEXT_TEST_CONFIG=$<CONFIG>"
-        "-DVNM_MSDF_TEXT_TEST_GENERATOR=${CMAKE_GENERATOR}"
-        "-DVNM_MSDF_TEXT_TEST_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+        "-DVNM_TOOLCHAIN_CONTEXT=${CMAKE_CURRENT_BINARY_DIR}/nested-toolchain.cmake"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_smoke.cmake")
   endif()
 endif()
