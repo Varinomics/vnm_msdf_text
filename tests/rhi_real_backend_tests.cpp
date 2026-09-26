@@ -148,6 +148,7 @@ const char* backend_name(QRhi::Implementation backend)
 std::unique_ptr<QRhi> create_backend(QRhi::Implementation backend)
 {
     switch (backend) {
+#if defined(Q_OS_WIN)
         case QRhi::D3D11: {
             QRhiD3D11InitParams params;
             return std::unique_ptr<QRhi>(QRhi::create(backend, &params));
@@ -156,6 +157,7 @@ std::unique_ptr<QRhi> create_backend(QRhi::Implementation backend)
             QRhiD3D12InitParams params;
             return std::unique_ptr<QRhi>(QRhi::create(backend, &params));
         }
+#endif
         default:
             return {};
     }
