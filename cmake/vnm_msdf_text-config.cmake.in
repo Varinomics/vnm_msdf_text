@@ -74,9 +74,9 @@ if((_vnm_msdf_text_wants_rhi AND @VNM_MSDF_TEXT_PACKAGE_HAS_RHI@ AND _vnm_msdf_t
    (_vnm_msdf_text_wants_qt_lcd AND @VNM_MSDF_TEXT_PACKAGE_HAS_QT_LCD@))
   if((_vnm_msdf_text_wants_rhi AND vnm_msdf_text_FIND_REQUIRED_rhi) OR
      (_vnm_msdf_text_wants_qt_lcd AND vnm_msdf_text_FIND_REQUIRED_qt_lcd))
-    find_dependency(Qt6 6.7 COMPONENTS Core Gui GuiPrivate)
+    find_dependency(Qt6 6.12 COMPONENTS Core Gui GuiPrivate)
   else()
-    find_package(Qt6 6.7 QUIET COMPONENTS Core Gui GuiPrivate)
+    find_package(Qt6 6.12 QUIET COMPONENTS Core Gui GuiPrivate)
   endif()
   if(TARGET Qt6::Core AND TARGET Qt6::Gui AND TARGET Qt6::GuiPrivate)
     if(_vnm_msdf_text_wants_rhi AND @VNM_MSDF_TEXT_PACKAGE_HAS_RHI@ AND _vnm_msdf_text_atlas_deps_found)

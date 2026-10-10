@@ -372,7 +372,7 @@ endif()
 # need neither Qt nor its private headers.
 # -----------------------------------------------------------------------------
 if(VNM_MSDF_TEXT_BUILD_QT_LCD)
-  find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui GuiPrivate)
+  find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui GuiPrivate)
   add_library(vnm_msdf_text_qt_lcd STATIC src/qt/lcd_resolver.cpp)
   add_library(vnm_msdf_text::qt_lcd ALIAS vnm_msdf_text_qt_lcd)
   set_target_properties(vnm_msdf_text_qt_lcd PROPERTIES EXPORT_NAME qt_lcd POSITION_INDEPENDENT_CODE ON)
@@ -392,7 +392,7 @@ if(VNM_MSDF_TEXT_BUILD_QT_LCD)
 endif()
 
 if(VNM_MSDF_TEXT_BUILD_RHI)
-  find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui GuiPrivate ShaderTools)
+  find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui GuiPrivate ShaderTools)
 
   add_library(vnm_msdf_text_rhi STATIC
     src/rhi/font_snapshot.cpp

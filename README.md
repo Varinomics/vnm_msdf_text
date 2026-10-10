@@ -191,7 +191,7 @@ to build it; Qt is located only when that option is on, so a CPU-only or
 editor-style consumer neither finds nor links Qt through this project. A
 consumer that requires GPU text can read the `VNM_MSDF_TEXT_HAS_RHI` cache
 entry and fail its own configure instead of linking a build without it. The
-component requires C++20, Qt 6.7 or newer, and Qt Shader Tools at build time
+component requires C++20, Qt 6.12 or newer, and Qt Shader Tools at build time
 only.
 
 Consume `vnm_msdf_text::rhi` through `add_subdirectory`, `FetchContent`, or
