@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    name: FreeBSD 15.0
+    name: FreeBSD 15.x
     runs-on: ubuntu-latest
 
     steps:
@@ -21,7 +21,8 @@ jobs:
       - name: Build and test
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "15.0"
+          # Keep the VM userland current with the FreeBSD 15 ports repository.
+          release: "15"
           usesh: true
           prepare: |
             pkg update -f
