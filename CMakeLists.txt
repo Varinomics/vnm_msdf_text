@@ -203,7 +203,7 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   vnm_msdf_text_set_fetchcontent_build_dir(freetype freetype)
   FetchContent_Declare(freetype
     GIT_REPOSITORY https://gitlab.freedesktop.org/freetype/freetype.git
-    GIT_TAG VER-2-13-3
+    GIT_TAG VER-2-14-3
     GIT_SHALLOW TRUE
     BINARY_DIR "${FETCHCONTENT_BINARY_DIR_freetype}"
   )
@@ -253,7 +253,7 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   vnm_msdf_text_set_fetchcontent_build_dir(msdfgen msdfgen)
   FetchContent_Declare(msdfgen
     GIT_REPOSITORY https://github.com/Chlumsky/msdfgen.git
-    GIT_TAG v1.12.1
+    GIT_TAG v1.13
     GIT_SHALLOW TRUE
     BINARY_DIR "${FETCHCONTENT_BINARY_DIR_msdfgen}"
   )
