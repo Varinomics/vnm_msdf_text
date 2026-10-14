@@ -275,9 +275,7 @@ correction.
 QRhi takes OpenGL-style scissor coordinates on every backend and itself flips
 them for the backends whose native origin is the top-left, so a caller uses one
 convention everywhere - and it is the opposite of the Y-down pixel space the
-text itself is laid out in. The real-backend gate pins that origin rather than
-asserting it: it clips the lower and the upper half of a target the text crosses
-and checks which half survives. Negative `x` or `y` and partially out-of-bounds
+text itself is laid out in. Negative `x` or `y` and partially out-of-bounds
 rectangles are clamped by QRhi, and a zero width or height clips the draw away.
 A negative width or height is not a rectangle QRhi can express -
 it drops such a scissor and leaves the previous one in force - so `queue()`
@@ -417,11 +415,10 @@ colour, because an LCD draw's one alpha stands for three channel coverages and
 cannot premultiply them, so its pipeline blends `SrcAlpha` against
 `OneMinusSrcAlpha` - the same `source over` composite by another route. Its LCD
 decode thresholds, filter weights, tap windows, and subpixel step are the ones
-`vnm_msdf_text::lcd_shader_reference` describes, and
-`vnm_msdf_text_rhi_styled_shader_reference_tests` reads the shader source to
-check they still are. The opacity and glow conditions that reference also states
-are enforced where the draw is queued rather than in the shader, so a caller that
-cannot have them is told rather than quietly given grayscale.
+`vnm_msdf_text::lcd_shader_reference` describes. The opacity and glow conditions
+that reference also states are enforced where the draw is queued rather than in
+the shader, so a caller that cannot have them is told rather than quietly given
+grayscale.
 
 ## Building
 
@@ -465,11 +462,8 @@ that pair.
 
 Only the file contract is used. vnm_fonts configures without Qt and publishes
 `VNM_FONTS_DIRECTORY` either way, so adding it puts no Qt in front of this
-build. Its `vnm::fonts` library marks a family name on the way into
-`QFontDatabase`, which is what two files declaring one family need so they
-cannot merge into a single entry. An atlas is baked from the file's bytes and
-enters no font database, so nothing here can collide with a font the user has
-installed and `vnm::fonts` is deliberately not linked.
+build. Atlases are baked from file bytes without using a font database or linking
+`vnm::fonts`.
 
 A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` registers further tests.
 `vnm_msdf_text_rhi_tests` covers the snapshot, batch, frame, and optional
@@ -498,18 +492,15 @@ cmake --build build-source-consumer
 ./build-source-consumer/vnm_msdf_text_rhi_source_consumer
 ```
 
-It is not registered with CTest. Configuring it detects a compiler and building
-it invokes one, and a build a test run starts is a build nothing scheduled.
+It is not registered with CTest.
 
 The `vnm_msdf_text_package_smoke` test installs the package and inspects it:
 component and exact-version resolution, dependency-light degradation, and the
-headers and targets the installed tree must not carry. It configures its
-consumers as `LANGUAGES NONE` projects, so it detects no compiler and builds
-nothing. `tests/package_consumer` covers the other half - that the installed
-headers and imported targets really compile, link, and run - and is a project
-of its own for the same reason `tests/source_consumer` is. Point it at the
-prefix the smoke test installed and at the version this project declares, once
-as the package stands and once as a dependency-light consumer sees it:
+headers and targets the installed tree must not carry. `tests/package_consumer`
+checks that the installed headers and imported targets compile, link, and run in
+a separate project. Point it at the prefix the smoke test installed and at the
+version this project declares, once as the package stands and once as a
+dependency-light consumer sees it:
 
 ```sh
 ctest --test-dir build -R vnm_msdf_text_package_smoke --output-on-failure
