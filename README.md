@@ -108,9 +108,8 @@ available; it is a reference advance, not proof that the font is monospace.
 
 `default_codepoints()` is a UI-oriented scalar set covering printable ASCII,
 selected Latin, Greek, currency, and UI symbol codepoints. It includes U+FFFD so
-callers can request a replacement glyph for invalid UTF-8 fallback. The bundled
-font is a test fixture and license-noticed convenience asset; it does not cover
-every codepoint in this default set.
+callers can request a replacement glyph for invalid UTF-8 fallback. The test font
+obtained from `vnm_fonts` does not cover every codepoint in this default set.
 
 ## Layout and rendering
 
@@ -284,12 +283,12 @@ else's clip.
 
 ### Optional draw capabilities
 
-`draw_capabilities.h` adds four optional capabilities. Each is a presence-tagged
-record with a version of its own, and each is absent by default. A draw state
-that carries none of them takes the base path described above: the same
-geometry, uniform block, shader, and pipeline a build without that header uses.
-A draw state that carries any of them is a *styled* draw and takes a second
-path, created only once a frame queues one.
+[draw_capabilities.h](https://github.com/Varinomics/vnm_msdf_text/blob/master/include/vnm_msdf_text/rhi/draw_capabilities.h) adds four
+optional capabilities. Each is a presence-tagged record with a version of its own,
+and each is absent by default. A draw state that carries none of them takes the
+base path described above: the same geometry, uniform block, shader, and pipeline
+a build without that header uses. A draw state that carries any of them is a
+*styled* draw and takes a second path, created only once a frame queues one.
 
 | Capability | Record | What it does |
 | --- | --- | --- |
@@ -309,20 +308,14 @@ each quad's rectangle itself and `append_quads()` takes one rectangle per
 vertex. Caller-supplied frames must be finite, positive, identical across each
 four-vertex quad, and equal that quad's axis-aligned bound. `prepare()` rejects
 a styled transform other than `pixel_ortho_transform(frame)` before it changes
-resources or enqueues updates. The fragment stage reconstructs where a fragment
-sits inside its glyph from that rectangle, which is what lets a subpixel filter
-step by a third of an output pixel.
+resources or enqueues updates.
 
-`lcd_style_t::order` is the existing `vnm_msdf_text::lcd_contract` resolution and
-the filter is the one `vnm_msdf_text::lcd_shader_reference` describes: three
-five-tap windows a third of a pixel apart, along X for `RGB` and `BGR` and along
-Y for `VRGB` and `VBGR`, in reverse channel order for `BGR` and `VBGR`. A
-display-specific order composes each channel's coverage against
-`background_color` and writes the straight colour that reproduces that mix once
-the pipeline has blended it, so it is only the intended image where the
-destination really is that background. `queue()` therefore rejects a
-display-specific order unless the draw colour and the background are both opaque
-within `lcd::shader_reference::k_lcd_opaque_alpha_cutoff` and no glow is present.
+`lcd_style_t::order` uses the shared
+[LCD contract and filter reference](https://github.com/Varinomics/vnm_msdf_text/blob/master/docs/lcd_msdf_commonization_contract.md).
+A display-specific order requires the destination to match `background_color`.
+`queue()` rejects a display-specific order unless the draw colour and the
+background are both opaque within
+`lcd::shader_reference::k_lcd_opaque_alpha_cutoff` and no glow is present.
 `NONE` is a valid order meaning no subpixel filtering: it composes exactly as the
 base path does, and none of those conditions applies to it.
 
@@ -339,14 +332,10 @@ centred, so an offset drop shadow is a second displaced run.
 distance in the MTSDF alpha channel, which keeps the sharp corners of the median
 while dropping what it reconstructs where its channels disagree.
 
-Absence is not a mode. A frame that queues no styled draw builds no styled
-pipeline and allocates no styled buffers, which `diagnostics()` reports through
-`styled_pipeline_builds` and the `styled_*_buffer_bytes` counters. A record
-naming a version this build does not implement is refused at that record's own
-boundary with `CAPABILITY_UNSUPPORTED`, and a record whose values or combination
-cannot describe a drawable result with `INVALID_ARGUMENT`; either way the call
-changes nothing, so the frame's other draws - base text included - record
-unchanged. Nothing is ever drawn without a capability that was asked for.
+A frame that queues no styled draw builds no styled pipeline and allocates no
+styled buffers. An unsupported record version returns `CAPABILITY_UNSUPPORTED`;
+invalid values or combinations return `INVALID_ARGUMENT`. Both leave the frame
+unchanged, including its other draws.
 
 ### Frames
 
@@ -368,13 +357,12 @@ A frame is:
    geometry, and uniform uploads go into the frame's resource-update batch.
 4. `record(frame)` inside the pass the host opened with that batch.
 
-Every step returns a `text_result_t`. `record()` reports `NOT_PREPARED` when
-text was queued but preparation did not run or did not succeed, so a frame can
-never present as text-complete when its text was dropped; `diagnostics()`
-reports what the call actually issued. A `queue()` that fails - a rejected clip,
-a batch from another font, a geometry limit, or `OUT_OF_MEMORY` - leaves the
-frame exactly as it was rather than half-queued. The renderer sets a scissor for
-every draw and leaves the viewport as the host set it.
+`queue()`, `prepare()`, and `record()` return a `text_result_t`. `record()` reports
+`NOT_PREPARED` when text was queued but preparation did not run or did not
+succeed; `diagnostics()` reports what the call issued. A `queue()` that fails - a
+rejected clip, a batch from another font, a geometry limit, or `OUT_OF_MEMORY` -
+leaves the frame exactly as it was rather than half-queued. The renderer sets a
+scissor for every draw and leaves the viewport as the host set it.
 
 The frame's first batch with geometry fixes the snapshot the whole frame uses.
 Every later batch must be laid out against that same snapshot, and the atlas
@@ -383,12 +371,9 @@ a frame can never combine one snapshot's geometry with another's atlas. A
 `set_font()` during a frame that already holds text therefore applies to the
 next frame that queues its first batch, not to the one in flight.
 
-The resource set is rebuilt when the QRhi changes, the pipeline when the
-render-pass descriptor or sample count changes, and the atlas is uploaded again
-when the renderer draws a different snapshot, even if the queued text did not
-change. Growing the vertex and index buffers rebuilds neither the shader
-bindings nor the pipeline, because neither buffer is named by the binding set.
-`diagnostics()` exposes those causes as counters.
+The resource set is rebuilt when the QRhi changes and the pipeline when the
+render-pass descriptor or sample count changes. Draw-size snapshots over the same
+`Baked_font` reuse its uploaded atlas.
 
 `prepare()` enqueues its uploads; it does not perform them. QRhi runs the
 commands in a `QRhiResourceUpdateBatch` only when the host submits the batch
@@ -397,9 +382,9 @@ and a host may release or abandon a batch instead, in which case nothing runs.
 So an enqueued atlas upload stays outstanding until a frame carrying it reaches
 `record()`, which the host runs inside the pass it opened with that batch; a
 frame cancelled, abandoned, or failed before then leaves the upload outstanding
-and the next `prepare()` enqueues it again. `atlas_upload_enqueues` counts those
-offers, not executed uploads. Nothing in this component observes GPU execution,
-presentation, or display, and it never claims to.
+and the next `prepare()` enqueues it again. See the
+[Text_renderer API](https://github.com/Varinomics/vnm_msdf_text/blob/master/include/vnm_msdf_text/rhi/text_renderer.h) for resource and
+diagnostic details.
 
 ### Shaders
 
@@ -467,24 +452,18 @@ build. Atlases are baked from file bytes without using a font database or linkin
 
 A build configured with `-DVNM_MSDF_TEXT_BUILD_RHI=ON` registers further tests.
 `vnm_msdf_text_rhi_tests` covers the snapshot, batch, frame, and optional
-draw-capability contracts, drives the Null QRhi backend, which proves resource
-lifecycle and command recording, and checks that every compiled shader artifact
-carries all seven backend profiles.
+draw-capability contracts using the Null QRhi backend.
 `vnm_msdf_text_rhi_styled_shader_reference_tests` checks the styled shader
 source against the shared LCD reference; it needs neither Qt nor a device.
-`vnm_msdf_text_rhi_real_backend_tests` renders text with a real backend and
-inspects the rasterized result, including the subpixel orders, the glow, the
-mask, and their combinations; it needs a working graphics device and is never a
-substitute for the Null suite. Pass `--backend`, `--image`, and `--window` to
+`vnm_msdf_text_rhi_real_backend_tests` checks rendered output with a real backend
+and needs a working graphics device. Pass `--backend`, `--image`, and `--window` to
 select the backend, save the rendered images, and additionally record frames
-against a shown window. The registered Windows gate uses D3D11 by default, so
-its raster proof is D3D11 evidence rather than a claim that an OpenGL backend
-was exercised.
+against a shown window. The Windows CTest entry selects D3D11.
 
-`tests/source_consumer` gates the way the component is actually consumed: it is
-a project of its own that adds this repository with `add_subdirectory`, checks
-`VNM_MSDF_TEXT_HAS_RHI`, includes only public headers, and links only
-`vnm_msdf_text::rhi`. Configure, build, and run it like any other consumer:
+`tests/source_consumer` is a standalone consumer test that adds this repository
+with `add_subdirectory`, checks `VNM_MSDF_TEXT_HAS_RHI`, includes only public
+headers, and links only `vnm_msdf_text::rhi`. Configure, build, and run it like any
+other consumer:
 
 ```sh
 cmake -S tests/source_consumer -B build-source-consumer -DVNM_MSDF_TEXT_FETCH_DEPS=ON
@@ -494,13 +473,11 @@ cmake --build build-source-consumer
 
 It is not registered with CTest.
 
-The `vnm_msdf_text_package_smoke` test installs the package and inspects it:
-component and exact-version resolution, dependency-light degradation, and the
-headers and targets the installed tree must not carry. `tests/package_consumer`
-checks that the installed headers and imported targets compile, link, and run in
-a separate project. Point it at the prefix the smoke test installed and at the
-version this project declares, once as the package stands and once as a
-dependency-light consumer sees it:
+The `vnm_msdf_text_package_smoke` test installs and inspects the exported package.
+`tests/package_consumer` checks that the installed headers and imported targets
+compile, link, and run in a separate project. Point it at the prefix the smoke
+test installed and at the version this project declares, once as the package
+stands and once as a dependency-light consumer sees it:
 
 ```sh
 ctest --test-dir build -R vnm_msdf_text_package_smoke --output-on-failure
