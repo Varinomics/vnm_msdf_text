@@ -1317,16 +1317,10 @@ text_result_t Text_renderer::record_draws(
 
     const std::size_t range_end = std::min(end, d->draws.size());
     const auto record_op = [&](const draw_op_t& op) {
-        if (!bound || bound_variant != op.variant) {
-            const bool styled = op.variant == Draw_variant::STYLED;
+        const bool bind_pipeline = !bound || bound_variant != op.variant;
+        const bool styled = op.variant == Draw_variant::STYLED;
+        if (bind_pipeline) {
             cb->setGraphicsPipeline(styled ? d->styled_pipeline.get() : d->pipeline.get());
-
-            const QRhiCommandBuffer::VertexInput vertex_input(
-                styled ? d->styled_vertex_buffer.get() : d->vertex_buffer.get(), 0);
-            cb->setVertexInput(
-                0, 1, &vertex_input,
-                styled ? d->styled_index_buffer.get() : d->index_buffer.get(),
-                0, QRhiCommandBuffer::IndexUInt32);
 
             bound         = true;
             bound_variant = op.variant;
@@ -1337,6 +1331,17 @@ text_result_t Text_renderer::record_draws(
         cb->setShaderResources(
             op.variant == Draw_variant::STYLED ? d->styled_srb.get() : d->srb.get(),
             1, &uniform_offset);
+
+        if (bind_pipeline) {
+            // Metal derives the vertex-buffer binding from the current SRB.
+            // Bind this draw's resources before replacing the vertex input.
+            const QRhiCommandBuffer::VertexInput vertex_input(
+                styled ? d->styled_vertex_buffer.get() : d->vertex_buffer.get(), 0);
+            cb->setVertexInput(
+                0, 1, &vertex_input,
+                styled ? d->styled_index_buffer.get() : d->index_buffer.get(),
+                0, QRhiCommandBuffer::IndexUInt32);
+        }
 
         if (op.clip.enabled) {
             cb->setScissor(QRhiScissor(op.clip.x, op.clip.y, op.clip.width, op.clip.height));
