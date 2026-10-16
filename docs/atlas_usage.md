@@ -14,8 +14,9 @@ sorted, and deduplicated before glyph generation.
 Build results use `Build_status`:
 
 - `SUCCESS`: every valid requested codepoint was emitted.
-- `PARTIAL_SUCCESS`: the atlas contains at least one emitted glyph, and the
-  diagnostic vectors describe skipped codepoints.
+- `PARTIAL_SUCCESS`: the atlas contains at least one emitted glyph, and at
+  least one diagnostic vector is not empty. A missing codepoint aliased to a
+  replacement glyph is still reported there although it is drawable.
 - `FAILURE`: no usable atlas was produced. The returned atlas is
   default-constructed and must not be rendered.
 

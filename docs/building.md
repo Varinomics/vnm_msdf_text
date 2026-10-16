@@ -79,9 +79,11 @@ The tests bake their atlases from a font that lives in
 [vnm_fonts](https://github.com/Varinomics/vnm_fonts), so a test build resolves
 that repository. A tree that has already added vnm_fonts has published the
 verbatim files in `VNM_FONTS_DIRECTORY`, and that is used as it stands;
-otherwise a checkout beside this one is used when it exists and CMake fetches
-`master` when it does not, and `FETCHCONTENT_SOURCE_DIR_VNM_FONTS` overrides
-that pair.
+otherwise a local checkout found by `vnm_cmake`'s workspace discovery (beside
+this one or in the adjacent `bsd_licensed` or `varinomics` directory; a linked
+worktree resolves from its Git common directory) is used, CMake fetches
+`master` when none exists, and `FETCHCONTENT_SOURCE_DIR_VNM_FONTS` overrides
+that discovery.
 
 Only the file contract is used. vnm_fonts configures without Qt and publishes
 `VNM_FONTS_DIRECTORY` either way, so adding it puts no Qt in front of this

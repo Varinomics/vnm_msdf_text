@@ -40,7 +40,7 @@ The result carries a status and, on success, a `shared_ptr` to the snapshot:
 - `FONT_BUILD_FAILED` when no usable atlas could be produced; no snapshot.
 - `OK` otherwise. A partially built atlas is an `OK` result with a usable
   snapshot whose `build_result().status` is `PARTIAL_SUCCESS` and whose
-  diagnostic vectors name the codepoints that were not emitted.
+  diagnostic vectors name the affected codepoints.
 
 A snapshot exposes the CPU data it was built from rather than restating it:
 `atlas()`, `draw_pixel_height()`, and the full `build_result()`. Measurement,

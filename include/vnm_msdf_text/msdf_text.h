@@ -192,8 +192,10 @@ struct options_t
  * @brief Result state for build_font_atlas.
  *
  * PARTIAL_SUCCESS means an atlas was produced and contains at least one glyph,
- * but the diagnostic vectors describe requested codepoints that were not
- * emitted.
+ * but at least one diagnostic vector is not empty. The vectors report requested
+ * codepoints that were invalid, missing from the font, failed to load, were too
+ * large, or found no space. A missing codepoint aliased to the replacement
+ * glyph is still reported in missing_codepoints although it is drawable.
  */
 enum class Build_status
 {
