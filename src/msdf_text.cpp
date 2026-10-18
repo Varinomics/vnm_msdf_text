@@ -1,5 +1,7 @@
 #include <vnm_msdf_text/msdf_text.h>
 
+#include "vector_growth.h"
+
 #include <msdfgen.h>
 #include <msdfgen-ext.h>
 
@@ -924,12 +926,12 @@ void append_text_quads(
     std::vector<std::uint32_t>* indices)
 {
     if (text.size() <= (vertices.max_size() - vertices.size()) / 4u) {
-        vertices.reserve(vertices.size() + text.size() * 4u);
+        detail::reserve_for_append(vertices, text.size() * 4u);
     }
     if (indices &&
         text.size() <= (indices->max_size() - indices->size()) / 6u)
     {
-        indices->reserve(indices->size() + text.size() * 6u);
+        detail::reserve_for_append(*indices, text.size() * 6u);
     }
 
     for_each_positioned_glyph_impl(

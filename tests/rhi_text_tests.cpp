@@ -48,10 +48,14 @@ namespace mtr  = vnm::msdf_text::rhi;
 
 namespace {
 int g_allocations_before_failure = -1;
+std::size_t* g_allocation_count = nullptr;
 }
 
 void* operator new(std::size_t size)
 {
+    if (g_allocation_count) {
+        ++*g_allocation_count;
+    }
     if (g_allocations_before_failure >= 0) {
         if (g_allocations_before_failure == 0) {
             g_allocations_before_failure = -1;
@@ -84,6 +88,21 @@ public:
 
     Failing_allocation(const Failing_allocation&)            = delete;
     Failing_allocation& operator=(const Failing_allocation&) = delete;
+};
+
+class Counting_allocations
+{
+public:
+    Counting_allocations() { g_allocation_count = &m_count; }
+    ~Counting_allocations() { g_allocation_count = nullptr; }
+
+    [[nodiscard]] std::size_t count() const { return m_count; }
+
+    Counting_allocations(const Counting_allocations&)            = delete;
+    Counting_allocations& operator=(const Counting_allocations&) = delete;
+
+private:
+    std::size_t m_count = 0;
 };
 
 constexpr int k_draw_pixel_height = 24;
@@ -517,6 +536,128 @@ bool test_batch_rejects_invalid_geometry()
     ok &= check(
         batch.empty() && !batch.font_identity().has_value(),
         "clearing a batch must drop its geometry and its font identity");
+    return ok;
+}
+
+bool test_incremental_batches_reuse_capacity()
+{
+    const mtr::Font_snapshot& font = shared_snapshot();
+    mtr::Text_batch sample;
+    bool ok = check_status(sample.enable_glyph_frames(), mtr::Text_status::OK,
+        "the sample must carry glyph frames");
+    ok &= check_status(sample.append_run(font, "Varinomics 0123", 4.0f, 20.0f),
+        mtr::Text_status::OK, "the sample run must append");
+    if (!ok) {
+        return false;
+    }
+
+    constexpr std::size_t k_runs = 512;
+    for (const bool supplied_quads : {false, true}) {
+        mtr::Text_batch batch;
+        ok &= check_status(batch.enable_glyph_frames(), mtr::Text_status::OK,
+            "the accumulated batch must carry glyph frames");
+        std::size_t allocations = 0;
+        for (std::size_t run = 0; run < k_runs; ++run) {
+            mtr::text_result_t appended;
+            {
+                Counting_allocations counter;
+                appended = supplied_quads
+                    ? batch.append_quads(font, sample.vertices(), sample.indices(), sample.glyph_frames())
+                    : batch.append_run(font, "Varinomics 0123", 4.0f, 20.0f);
+                allocations += counter.count();
+            }
+            if (!check_status(appended, mtr::Text_status::OK, "each incremental run must append")) {
+                return false;
+            }
+        }
+
+        // Amortized growth should need far fewer allocations than one per run,
+        // without specifying the private growth factor or allocator capacities.
+        ok &= check(allocations < k_runs / 4,
+            "incremental batches must not reallocate their buffers for every label");
+        if (!check(batch.vertices().size() == sample.vertices().size() * k_runs &&
+                batch.indices().size() == sample.indices().size() * k_runs &&
+                batch.glyph_frames().size() == sample.glyph_frames().size() * k_runs,
+            "incremental growth must retain all supplied geometry"))
+        {
+            return false;
+        }
+        for (std::size_t run = 0; run < k_runs; ++run) {
+            const auto vertex_offset = run * sample.vertices().size();
+            ok &= check(std::memcmp(batch.vertices().data() + vertex_offset,
+                    sample.vertices().data(), sample.vertices().size_bytes()) == 0 &&
+                    std::memcmp(batch.glyph_frames().data() + vertex_offset,
+                    sample.glyph_frames().data(), sample.glyph_frames().size_bytes()) == 0,
+                "each accumulated run must retain its vertex and frame bytes");
+            for (std::size_t index = 0; index < sample.indices().size(); ++index) {
+                ok &= check(batch.indices()[run * sample.indices().size() + index] ==
+                        sample.indices()[index] + vertex_offset,
+                    "each accumulated run must rebase its indices without changing topology");
+            }
+        }
+
+        batch.clear();
+        ok &= check_status(batch.enable_glyph_frames(), mtr::Text_status::OK,
+            "cleared frames can be enabled again");
+        std::size_t retained_allocations = 0;
+        for (std::size_t run = 0; run < k_runs; ++run) {
+            mtr::text_result_t appended;
+            {
+                Counting_allocations counter;
+                appended = batch.append_quads(
+                    font, sample.vertices(), sample.indices(), sample.glyph_frames());
+                retained_allocations += counter.count();
+            }
+            ok &= check_status(appended, mtr::Text_status::OK, "retained storage must accept each run");
+        }
+        ok &= check(retained_allocations == 0, "clear must retain reusable geometry capacity");
+    }
+    return ok;
+}
+
+bool test_framed_batch_growth_is_atomic()
+{
+    const mtr::Font_snapshot& font = shared_snapshot();
+    mtr::Text_batch large;
+    bool ok = check_status(large.enable_glyph_frames(), mtr::Text_status::OK,
+        "the large sample must carry frames");
+    const std::string text(256, 'V');
+    ok &= check_status(large.append_run(font, text, 4.0f, 20.0f), mtr::Text_status::OK,
+        "the large sample must append");
+    for (const bool supplied_quads : {false, true}) {
+        for (int survivors = 0; survivors < 3; ++survivors) {
+            mtr::Text_batch batch;
+            ok &= check_status(batch.enable_glyph_frames(), mtr::Text_status::OK,
+                "the growing batch must carry frames");
+            ok &= check_status(batch.append_run(font, "V", 4.0f, 20.0f), mtr::Text_status::OK,
+                "the prefix must append before injected failure");
+            const std::vector vertices(batch.vertices().begin(), batch.vertices().end());
+            const std::vector indices(batch.indices().begin(), batch.indices().end());
+            const std::vector frames(batch.glyph_frames().begin(), batch.glyph_frames().end());
+            const auto identity = batch.font_identity();
+            mtr::text_result_t appended;
+            {
+                Failing_allocation fail(survivors);
+                appended = supplied_quads
+                    ? batch.append_quads(font, large.vertices(), large.indices(), large.glyph_frames())
+                    : batch.append_run(font, text, 4.0f, 20.0f);
+            }
+            ok &= check_status(appended, mtr::Text_status::OUT_OF_MEMORY,
+                "each geometry buffer growth must be covered by allocation failure");
+            const bool same_sizes = batch.vertices().size() == vertices.size() &&
+                batch.indices().size() == indices.size() && batch.glyph_frames().size() == frames.size();
+            ok &= check(same_sizes && batch.font_identity() == identity,
+                "failed growth must retain the prefix sizes and font identity");
+            if (same_sizes) {
+                ok &= check(std::memcmp(batch.vertices().data(), vertices.data(), batch.vertices().size_bytes()) == 0 &&
+                        std::memcmp(batch.indices().data(), indices.data(), batch.indices().size_bytes()) == 0 &&
+                        std::memcmp(batch.glyph_frames().data(), frames.data(), batch.glyph_frames().size_bytes()) == 0,
+                    "failed growth must retain every prefix byte");
+            }
+            ok &= check_status(batch.append_quads(font, large.vertices(), large.indices(), large.glyph_frames()),
+                mtr::Text_status::OK, "the same large append must succeed on retry");
+        }
+    }
     return ok;
 }
 
@@ -1622,9 +1763,58 @@ bool test_null_geometry_growth_keeps_the_pipeline()
     return ok;
 }
 
+bool test_incremental_queues_reuse_capacity()
+{
+    const auto held = build_sample_snapshot();
+    if (!check(held.snapshot != nullptr, "the queue snapshot must build")) {
+        return false;
+    }
+    mtr::Text_batch batch;
+    bool ok = check_status(batch.enable_glyph_frames(), mtr::Text_status::OK,
+        "the queued sample must carry frames");
+    ok &= check_status(batch.append_run(*held.snapshot, "Varinomics 0123", 4.0f, 20.0f),
+        mtr::Text_status::OK, "the queued sample must append");
+
+    constexpr std::size_t k_draws = 512;
+    for (const bool styled : {false, true}) {
+        mtr::Text_renderer renderer;
+        renderer.set_font(held.snapshot);
+        mtr::draw_state_t state;
+        if (styled) {
+            state.glow = mtr::glow_style_t{};
+            state.glow->radius_px = 1.0f;
+        }
+        for (int frame = 0; frame < 2; ++frame) {
+            renderer.begin_frame();
+            std::size_t allocations = 0;
+            for (std::size_t draw = 0; draw < k_draws; ++draw) {
+                mtr::text_result_t queued;
+                {
+                    Counting_allocations counter;
+                    queued = renderer.queue(batch, state);
+                    allocations += counter.count();
+                }
+                if (!check_status(queued, mtr::Text_status::OK, "every incremental draw must queue")) {
+                    return false;
+                }
+            }
+            ok &= check(allocations < k_draws / 4,
+                "incremental draws must not reallocate the frame buffers for every label");
+            if (frame > 0) {
+                ok &= check(allocations == 0, "a repeated frame must reuse queue capacity");
+            }
+            const auto draws = k_draws * (styled ? 2u : 1u);
+            ok &= check(renderer.diagnostics().queued_draws == draws &&
+                    renderer.diagnostics().queued_indices == batch.indices().size() * draws,
+                "growth must retain every geometry range and glow draw");
+        }
+    }
+    return ok;
+}
+
 // A queued frame is walked as one array of uniform blocks and draw ops, so a
 // failed allocation must leave both of them exactly as they were.
-bool test_null_queue_survives_allocation_failure()
+bool test_null_queue_survives_allocation_failure(bool styled)
 {
     const mtr::font_snapshot_result_t held = build_sample_snapshot();
     if (!check(held.snapshot != nullptr, "the renderer's snapshot must build")) {
@@ -1633,7 +1823,9 @@ bool test_null_queue_survives_allocation_failure()
 
     mtr::Text_batch small;
     mtr::Text_batch large;
-    bool ok = check_status(
+    bool ok = check_status(small.enable_glyph_frames(), mtr::Text_status::OK, "small frames must enable");
+    ok &= check_status(large.enable_glyph_frames(), mtr::Text_status::OK, "large frames must enable");
+    ok &= check_status(
         small.append_run(*held.snapshot, "V", 8.0f, 40.0f),
         mtr::Text_status::OK,
         "the small run must be appended");
@@ -1657,9 +1849,17 @@ bool test_null_queue_survives_allocation_failure()
         mtr::Text_renderer renderer;
         renderer.set_font(held.snapshot);
 
+        mtr::draw_state_t state;
+        state.transform = mtr::pixel_ortho_transform({.rhi = rhi.get(), .render_target = offscreen.target()});
+        if (styled) {
+            state.glow = mtr::glow_style_t{};
+            state.glow->radius_px = 1.0f;
+        }
+        const std::size_t draws_per_batch = styled ? 2u : 1u;
+
         renderer.begin_frame();
         ok &= check_status(
-            renderer.queue(small, mtr::draw_state_t{}),
+            renderer.queue(small, state),
             mtr::Text_status::OK,
             "the first draw must queue");
         const std::size_t queued_indices = renderer.diagnostics().queued_indices;
@@ -1667,7 +1867,7 @@ bool test_null_queue_survives_allocation_failure()
         mtr::text_result_t queued{};
         {
             Failing_allocation fail(survivors);
-            queued = renderer.queue(large, mtr::draw_state_t{});
+            queued = renderer.queue(large, state);
         }
         if (queued.status == mtr::Text_status::OK) {
             continue;
@@ -1679,18 +1879,18 @@ bool test_null_queue_survives_allocation_failure()
             mtr::Text_status::OUT_OF_MEMORY,
             "a queue that could not be allocated must report out of memory");
         ok &= check(
-            renderer.diagnostics().queued_draws == 1 &&
+            renderer.diagnostics().queued_draws == draws_per_batch &&
                 renderer.diagnostics().queued_indices == queued_indices,
             "a failed queue must leave the frame exactly as it was");
 
         // The frame must still be consistent enough to prepare and record, which
         // is what a leftover uniform block without its draw op would break.
         ok &= check_status(
-            renderer.queue(small, mtr::draw_state_t{}),
+            renderer.queue(small, state),
             mtr::Text_status::OK,
             "the frame must still accept work after a failed queue");
         ok &= check(
-            renderer.diagnostics().queued_draws == 2, "the retried draw must be queued");
+            renderer.diagnostics().queued_draws == draws_per_batch * 2, "the retried draw must be queued");
 
         QRhiCommandBuffer* cb = nullptr;
         if (!check(
@@ -1714,13 +1914,13 @@ bool test_null_queue_survives_allocation_failure()
         rhi->endOffscreenFrame();
 
         ok &= check(
-            renderer.diagnostics().recorded_draws == 2,
+            renderer.diagnostics().recorded_draws == draws_per_batch * 2,
             "the frame must record exactly the draws it kept");
 
         renderer.release_resources();
     }
 
-    ok &= check(failures > 0, "the allocation seam must actually fail a queue");
+    ok &= check(failures == 4, "all four queue containers must be covered by allocation failure");
     return ok;
 }
 
@@ -3107,6 +3307,8 @@ int main(int argc, char** argv)
     ok &= run_test("batch agrees with measurement and bounds", test_batch_agrees_with_measurement_and_bounds);
     ok &= run_test("batch rejects invalid geometry", test_batch_rejects_invalid_geometry);
     ok &= run_test("batch survives allocation failure", test_batch_survives_allocation_failure);
+    ok &= run_test("incremental batches reuse capacity", test_incremental_batches_reuse_capacity);
+    ok &= run_test("framed batch growth is atomic", test_framed_batch_growth_is_atomic);
     ok &= run_test("null records prepared text", test_null_records_prepared_text);
     ok &= run_test("null reports frame and font failures", test_null_reports_frame_and_font_failures);
     ok &= run_test("null queue after prepare is not recorded", test_null_queue_after_prepare_is_not_recorded);
@@ -3119,7 +3321,11 @@ int main(int argc, char** argv)
     ok &= run_test("null unprepared record does not settle an abandoned upload", test_null_unprepared_record_does_not_settle_an_abandoned_upload);
     ok &= run_test("null rejects unusable clip rectangles", test_null_rejects_unusable_clip_rectangles);
     ok &= run_test("null geometry growth keeps the pipeline", test_null_geometry_growth_keeps_the_pipeline);
-    ok &= run_test("null queue survives allocation failure", test_null_queue_survives_allocation_failure);
+    ok &= run_test("null base queue survives allocation failure",
+        [] { return test_null_queue_survives_allocation_failure(false); });
+    ok &= run_test("null styled queue survives allocation failure",
+        [] { return test_null_queue_survives_allocation_failure(true); });
+    ok &= run_test("incremental queues reuse capacity", test_incremental_queues_reuse_capacity);
     ok &= run_test("batch glyph frames bound their own quads", test_batch_glyph_frames_bound_their_own_quads);
     ok &= run_test("batch quads and frames must agree", test_batch_quads_and_frames_must_agree);
     ok &= run_test("null unknown capability versions stay local", test_null_unknown_capability_versions_stay_local);

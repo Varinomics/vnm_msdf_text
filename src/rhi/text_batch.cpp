@@ -1,5 +1,7 @@
 #include <vnm_msdf_text/rhi/text_batch.h>
 
+#include "../vector_growth.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -7,6 +9,9 @@
 #include <stdexcept>
 
 namespace vnm::msdf_text::rhi {
+
+using vnm::msdf_text::detail::reserve_for_append;
+
 namespace {
 
 constexpr std::size_t k_max_vertices =
@@ -123,7 +128,7 @@ bool Text_batch::append_quad_frames(std::size_t mark)
     // non-throwing, so a failure here is the only way this can fail and it
     // happens before anything has been written.
     try {
-        m_glyph_frames.reserve(m_vertices.size());
+        reserve_for_append(m_glyph_frames, m_vertices.size() - m_glyph_frames.size());
     }
     catch (const std::bad_alloc&) {
         return false;
@@ -259,9 +264,14 @@ text_result_t Text_batch::append_quads(
     // allocation cannot leave the batch holding vertices without their indices
     // or without the frame rectangles the capability promises for them.
     try {
-        m_vertices.reserve(m_vertices.size() + vertices.size());
-        m_indices.reserve(m_indices.size() + indices.size());
-        m_glyph_frames.reserve(m_glyph_frames.size() + frames.size());
+        reserve_for_append(m_vertices, vertices.size());
+        reserve_for_append(m_indices, indices.size());
+        reserve_for_append(m_glyph_frames, frames.size());
+    }
+    catch (const std::length_error&) {
+        return detail::make_text_result(
+            Text_status::GEOMETRY_LIMIT_EXCEEDED,
+            "text quad geometry exceeds the capacity of one batch");
     }
     catch (const std::bad_alloc&) {
         return detail::make_text_result(

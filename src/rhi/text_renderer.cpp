@@ -1,5 +1,7 @@
 #include <vnm_msdf_text/rhi/text_renderer.h>
 
+#include "../vector_growth.h"
+
 #include <vnm_msdf_text/lcd_shader_reference.h>
 
 #include <rhi/qrhi.h>
@@ -24,6 +26,9 @@
 #include <vector>
 
 namespace vnm::msdf_text::rhi {
+
+using vnm::msdf_text::detail::reserve_for_append;
+
 namespace {
 
 /**
@@ -1058,16 +1063,21 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
     // Past this point each append fits reserved capacity and cannot throw.
     try {
         if (styled) {
-            d->styled_vertices.reserve(base_vertex + batch_vertices.size());
-            d->styled_indices.reserve(index_start + batch_indices.size());
-            d->styled_uniforms.reserve(d->styled_uniforms.size() + queued_ops);
+            reserve_for_append(d->styled_vertices, batch_vertices.size());
+            reserve_for_append(d->styled_indices, batch_indices.size());
+            reserve_for_append(d->styled_uniforms, queued_ops);
         }
         else {
-            d->vertices.reserve(base_vertex + batch_vertices.size());
-            d->indices.reserve(index_start + batch_indices.size());
-            d->uniforms.reserve(d->uniforms.size() + queued_ops);
+            reserve_for_append(d->vertices, batch_vertices.size());
+            reserve_for_append(d->indices, batch_indices.size());
+            reserve_for_append(d->uniforms, queued_ops);
         }
-        d->draws.reserve(d->draws.size() + queued_ops);
+        reserve_for_append(d->draws, queued_ops);
+    }
+    catch (const std::length_error&) {
+        return detail::make_text_result(
+            Text_status::GEOMETRY_LIMIT_EXCEEDED,
+            "the frame's text geometry exceeds its container capacity");
     }
     catch (const std::bad_alloc&) {
         return detail::make_text_result(
