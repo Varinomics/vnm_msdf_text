@@ -255,6 +255,10 @@ using layout_callback_t = std::function<void(const positioned_glyph_t&)>;
 [[nodiscard]]
 std::vector<char32_t> default_codepoints();
 
+/**
+ * @brief Decode UTF-8, replacing invalid sequences with U+FFFD while preserving
+ * following well-formed characters.
+ */
 [[nodiscard]]
 std::vector<char32_t> utf8_to_codepoints(std::string_view text);
 

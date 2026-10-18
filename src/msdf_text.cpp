@@ -94,14 +94,8 @@ char32_t utf8_decode_one(const char*& it, const char* end)
     }
 
     const auto* sequence_end = reinterpret_cast<const unsigned char*>(end);
-    const std::size_t continuation_count = sequence_length - 1;
-    if (static_cast<std::size_t>(sequence_end - p) < continuation_count) {
-        it = end;
-        return k_replacement_char;
-    }
-
     for (std::size_t i = 1; i < sequence_length; ++i) {
-        if (!is_continuation(*p)) {
+        if (p == sequence_end || !is_continuation(*p)) {
             it = reinterpret_cast<const char*>(p);
             return k_replacement_char;
         }

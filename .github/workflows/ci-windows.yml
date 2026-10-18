@@ -10,13 +10,31 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CMAKE_GENERATOR: Ninja
+  CMAKE_C_COMPILER_LAUNCHER: sccache
+  CMAKE_CXX_COMPILER_LAUNCHER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   build:
     name: Windows
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
 
     steps:
       - uses: actions/checkout@v5
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: '14.51'
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Verify Visual Studio 2026 environment
+        shell: pwsh
+        run: |
+          if ($env:VisualStudioVersion -ne '18.0' -or $env:VCToolsVersion -notlike '14.51.*') {
+            throw 'Visual Studio 2026 with MSVC v145 is required'
+          }
 
       - name: Configure
         run: >
@@ -34,12 +52,24 @@ jobs:
 
   full-export:
     name: Windows full export
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     env:
       VCPKG_TARGET_TRIPLET: x64-windows
 
     steps:
       - uses: actions/checkout@v5
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          toolset: '14.51'
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Verify Visual Studio 2026 environment
+        shell: pwsh
+        run: |
+          if ($env:VisualStudioVersion -ne '18.0' -or $env:VCToolsVersion -notlike '14.51.*') {
+            throw 'Visual Studio 2026 with MSVC v145 is required'
+          }
 
       - name: Bootstrap vcpkg
         shell: pwsh

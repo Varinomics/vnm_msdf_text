@@ -104,15 +104,44 @@ char32_t missing_codepoint_for_font(const std::vector<std::uint8_t>& font_data)
     throw std::runtime_error("test font unexpectedly covers all missing-glyph candidates");
 }
 
-bool test_utf8_truncated_sequence()
+struct utf8_case_t
 {
-    const std::string truncated = std::string("\xE2\x82", 2);
-    const std::vector<char32_t> decoded = msdf::utf8_to_codepoints(truncated);
+    std::string_view bytes;
+    std::u32string_view codepoints;
+};
 
-    if (!check(decoded.size() == 1, "truncated UTF-8 must decode to one replacement codepoint")) {
-        return false;
+// Unicode 3.9.5 requires preserving well-formed successors of an invalid prefix.
+constexpr utf8_case_t k_utf8_prefix_cases[] = {
+    {"\xC2",                         U"\uFFFD"},
+    {"\xE2",                         U"\uFFFD"},
+    {"\xE2\x82",                     U"\uFFFD"},
+    {"\xF0",                         U"\uFFFD"},
+    {"\xF0\x90",                     U"\uFFFD"},
+    {"\xF0\x90\x91",                 U"\uFFFD"},
+    {"\xE2" "A",                     U"\uFFFDA"},
+    {"\xF0" "AB",                    U"\uFFFDAB"},
+    {"\xF0\x90" "A",                 U"\uFFFDA"},
+    {"\xE2" "AB",                    U"\uFFFDAB"},
+    {"\xF0" "ABC",                   U"\uFFFDABC"},
+    {"\xE2\x82" "A",                 U"\uFFFDA"},
+    {"\xF0\x90\x91" "A",             U"\uFFFDA"},
+    {"\xF0\xC2\xA2",                 U"\uFFFD\u00A2"},
+    {"\xF0\x90\xC2\xA2",             U"\uFFFD\u00A2"},
+    {"\xF0\xE2\x82\xAC",             U"\uFFFD\u20AC"},
+
+    {"\xC2\xA2\xE2\x82\xAC\xF0\x9F\x98\x80", U"\u00A2\u20AC\U0001F600"},
+};
+
+bool test_utf8_prefix_decoding()
+{
+    bool ok = true;
+    for (const auto& test_case : k_utf8_prefix_cases) {
+        const auto decoded = msdf::utf8_to_codepoints(test_case.bytes);
+        const std::vector<char32_t> expected(
+            test_case.codepoints.begin(), test_case.codepoints.end());
+        ok &= check(decoded == expected, "UTF-8 decoding must preserve valid suffixes and replace invalid prefixes");
     }
-    return check(decoded[0] == k_replacement_char, "truncated UTF-8 must decode to U+FFFD");
+    return ok;
 }
 
 bool test_default_codepoints_are_explicit_scalars()
@@ -352,6 +381,70 @@ msdf::atlas_t unit_scale_atlas(int draw_pixel_height)
     atlas.atlas_px_range = 0.0;
     atlas.sharpness_bias = 1.0f;
     return atlas;
+}
+
+bool test_utf8_prefix_layout()
+{
+    constexpr int draw_height = 32;
+    constexpr float advance = 5.0f;
+    msdf::atlas_t atlas = unit_scale_atlas(draw_height);
+    msdf::glyph_t glyph;
+    glyph.advance_units       = advance;
+    glyph.bounds_left_units   = 1.0f;
+    glyph.bounds_right_units  = 4.0f;
+    glyph.bounds_bottom_units = -2.0f;
+    glyph.bounds_top_units    = 7.0f;
+    glyph.visible             = true;
+    for (char32_t codepoint : std::u32string_view(U"\uFFFDABC\u00A2\u20AC\U0001F600")) {
+        atlas.glyphs.emplace(codepoint, glyph);
+    }
+
+    bool ok = true;
+    for (const auto& test_case : k_utf8_prefix_cases) {
+        const std::vector<char32_t> expected(
+            test_case.codepoints.begin(), test_case.codepoints.end());
+        const float expected_advance = advance * (float)expected.size();
+        std::vector<char32_t> visited;
+        std::vector<float> positions;
+        const auto record_glyph = [
+                &visited,
+                &positions
+            ](
+                const msdf::positioned_glyph_t& positioned)
+            {
+                visited.push_back(positioned.codepoint);
+                positions.push_back(positioned.pen_x);
+            };
+        const float final_pen_x = msdf::for_each_positioned_glyph(
+            atlas, draw_height, test_case.bytes, 10.0f, record_glyph);
+        ok &= check(visited == expected, "layout must visit each replacement and valid successor");
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            ok &= check(positions[i] == 10.0f + advance * (float)i,
+                "layout must position each decoded glyph at its advance");
+        }
+        ok &= check(final_pen_x == 10.0f + expected_advance,
+            "layout must retain the advance of valid UTF-8 successors");
+        ok &= check(msdf::measure_text_advance_px(atlas, draw_height, test_case.bytes) == expected_advance,
+            "measurement must retain the advance of valid UTF-8 successors");
+
+        const auto bounds = msdf::measure_text_bounds_px(atlas, draw_height, test_case.bytes);
+        ok &= check(bounds.has_visible_glyphs, "decoded UTF-8 must retain visible glyphs");
+        ok &= check(bounds.advance_x == expected_advance,
+            "bounds must retain the advance of valid UTF-8 successors");
+        ok &= check(bounds.left == 1.0f && bounds.right == expected_advance - advance + 4.0f &&
+            bounds.top == -7.0f && bounds.bottom == 2.0f,
+            "bounds must include every decoded glyph");
+
+        std::vector<msdf::text_vertex_t> vertices;
+        std::vector<std::uint32_t> indices;
+        msdf::append_text_quads(
+            atlas, draw_height, test_case.bytes, 10.0f, 20.0f, vertices, &indices);
+        ok &= check(vertices.size() == expected.size() * 4,
+            "geometry must retain quads for valid UTF-8 successors");
+        ok &= check(indices.size() == expected.size() * 6,
+            "geometry must retain indices for valid UTF-8 successors");
+    }
+    return ok;
 }
 
 bool test_whitespace_skips_degenerate_quads()
@@ -688,7 +781,8 @@ bool run_test(const char* name, bool (*test)())
 int main()
 {
     bool ok = true;
-    ok &= run_test("utf8 truncated sequence", test_utf8_truncated_sequence);
+    ok &= run_test("utf8 prefix decoding", test_utf8_prefix_decoding);
+    ok &= run_test("utf8 prefix layout", test_utf8_prefix_layout);
     ok &= run_test("default codepoints are explicit scalars", test_default_codepoints_are_explicit_scalars);
     ok &= run_test("invalid and duplicate codepoints", test_invalid_and_duplicate_codepoints);
     ok &= run_test("missing glyph failure", test_missing_glyph_failure);

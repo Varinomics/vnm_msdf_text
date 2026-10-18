@@ -18,6 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Cache compiler outputs
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: freebsd-15-x86_64-ccache-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: freebsd-15-x86_64-ccache-v1-
+
       - name: Build and test
         uses: vmactions/freebsd-vm@v1
         with:
@@ -26,11 +33,18 @@ jobs:
           usesh: true
           prepare: |
             pkg update -f
-            pkg install -y cmake ninja pkgconf git
+            pkg install -y cmake ninja pkgconf git ccache freetype2
           run: |
+            export CCACHE_DIR="$PWD/.ccache"
+            export CCACHE_BASEDIR="$PWD"
+            export CCACHE_COMPILERCHECK=content
+            ccache --zero-stats
             cmake -S . -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
               -DVNM_MSDF_TEXT_BUILD_TESTS=ON \
               -DVNM_MSDF_TEXT_FETCH_DEPS=ON
             cmake --build build --config Release
+            ccache --show-stats
             ctest --test-dir build --output-on-failure
