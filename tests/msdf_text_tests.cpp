@@ -369,6 +369,147 @@ bool test_atlas_generation_smoke()
     return ok;
 }
 
+bool same_build_diagnostics(const msdf::build_result_t& left, const msdf::build_result_t& right)
+{
+    return left.status == right.status &&
+        left.invalid_codepoints == right.invalid_codepoints &&
+        left.missing_codepoints == right.missing_codepoints &&
+        left.failed_codepoints == right.failed_codepoints &&
+        left.skipped_too_large == right.skipped_too_large &&
+        left.skipped_no_space == right.skipped_no_space &&
+        left.atlas_full == right.atlas_full;
+}
+
+std::vector<std::uint8_t> glyph_pixels(const msdf::atlas_t& atlas, const msdf::glyph_t& glyph)
+{
+    const int left = static_cast<int>(std::lround(glyph.uv_left * atlas.atlas_size));
+    const int top = static_cast<int>(std::lround(glyph.uv_top * atlas.atlas_size));
+    const int right = static_cast<int>(std::ceil(glyph.uv_right * atlas.atlas_size));
+    const int bottom = static_cast<int>(std::ceil(glyph.uv_bottom * atlas.atlas_size));
+    if (left < 0 || top < 0 || right > atlas.atlas_size || bottom > atlas.atlas_size ||
+        right <= left || bottom <= top)
+    {
+        throw std::runtime_error("glyph UVs must address a nonempty rectangle within the atlas");
+    }
+    std::vector<std::uint8_t> pixels;
+    for (int y = top; y < bottom; ++y) {
+        const auto row = atlas.rgba.begin() +
+            (static_cast<std::size_t>(y) * atlas.atlas_size + left) * 4u;
+        pixels.insert(pixels.end(), row, row + (right - left) * 4);
+    }
+    return pixels;
+}
+
+bool test_auto_atlas_preserves_glyphs()
+{
+    const auto font_data = read_test_font();
+    const auto codepoints = msdf::default_codepoints();
+    msdf::options_t options = atlas_options(2048);
+    options.build_kerning_table = true;
+    const auto build = [&] {
+        return msdf::build_font_atlas(
+            font_data.data(), font_data.size(), k_default_draw_pixel_height, codepoints, options);
+    };
+    const auto fixed = build();
+    options.auto_atlas_size = true;
+    const auto automatic = build();
+    const int size = automatic.atlas.atlas_size;
+
+    bool ok = true;
+    ok &= check(fixed.status != msdf::Build_status::FAILURE, "reference atlas must build");
+    ok &= check(fixed.atlas.atlas_size == 2048, "fixed atlas sizing must remain the default");
+    ok &= check(size > 1 && size < 2048 && (size & (size - 1)) == 0,
+        "automatic atlas must use a smaller power-of-two texture for the test font");
+    if (!ok) {
+        return false;
+    }
+    ok &= check(automatic.atlas.rgba.size() == static_cast<std::size_t>(size) * size * 4u,
+        "automatic atlas must allocate only the selected texture size");
+    ok &= check(same_build_diagnostics(fixed, automatic), "sizing must preserve build diagnostics");
+    ok &= check(fixed.atlas.bitmap_scale == automatic.atlas.bitmap_scale &&
+        fixed.atlas.atlas_px_range == automatic.atlas.atlas_px_range &&
+        fixed.atlas.kerning_units == automatic.atlas.kerning_units,
+        "sizing must preserve distance-field scale and kerning");
+    ok &= check(fixed.atlas.glyphs.size() == automatic.atlas.glyphs.size(),
+        "sizing must preserve glyph coverage");
+    for (const auto& [codepoint, glyph] : fixed.atlas.glyphs) {
+        const auto found = automatic.atlas.glyphs.find(codepoint);
+        if (!check(found != automatic.atlas.glyphs.end(), "automatic atlas must retain every glyph")) {
+            return false;
+        }
+        const auto& packed = found->second;
+        ok &= check(glyph.advance_units == packed.advance_units &&
+            glyph.bounds_left_units == packed.bounds_left_units &&
+            glyph.bounds_right_units == packed.bounds_right_units &&
+            glyph.bounds_top_units == packed.bounds_top_units &&
+            glyph.bounds_bottom_units == packed.bounds_bottom_units &&
+            glyph.visible == packed.visible,
+            "sizing must preserve glyph geometry");
+        if (glyph.visible) {
+            ok &= check(near_equal(
+                (glyph.uv_right - glyph.uv_left) * fixed.atlas.atlas_size,
+                (packed.uv_right - packed.uv_left) * size) && near_equal(
+                (glyph.uv_bottom - glyph.uv_top) * fixed.atlas.atlas_size,
+                (packed.uv_bottom - packed.uv_top) * size),
+                "glyph UVs must preserve the raster dimensions");
+            ok &= check(glyph_pixels(fixed.atlas, glyph) == glyph_pixels(automatic.atlas, packed),
+                "automatic sizing must preserve every glyph's MTSDF pixels");
+        }
+    }
+    options.auto_atlas_size = false;
+    options.atlas_size = size / 2;
+    const auto smaller = build();
+    ok &= check(smaller.atlas.glyphs.size() < automatic.atlas.glyphs.size(),
+        "the next smaller power-of-two atlas must not fit the same glyph coverage");
+    return ok;
+}
+
+bool test_auto_atlas_preserves_maximum_diagnostics()
+{
+    const auto font_data = read_test_font();
+    auto codepoints = msdf::default_codepoints();
+    codepoints.push_back(k_invalid_surrogate);
+    codepoints.push_back(missing_codepoint_for_font(font_data));
+    bool ok = true;
+    for (int maximum : {127, 128}) {
+        for (const auto policy : {msdf::Missing_glyph_policy::SKIP,
+                                 msdf::Missing_glyph_policy::USE_REPLACEMENT_CHARACTER,
+                                 msdf::Missing_glyph_policy::FAIL_BUILD})
+        {
+            msdf::options_t options = atlas_options(maximum);
+            options.missing_glyph_policy = policy;
+            const auto fixed = msdf::build_font_atlas(
+                font_data.data(), font_data.size(), k_default_draw_pixel_height, codepoints, options);
+            options.auto_atlas_size = true;
+            const auto automatic = msdf::build_font_atlas(
+                font_data.data(), font_data.size(), k_default_draw_pixel_height, codepoints, options);
+            ok &= check(same_build_diagnostics(fixed, automatic),
+                "automatic sizing must preserve maximum-size overflow and missing-glyph diagnostics");
+            ok &= check(fixed.atlas.atlas_size == automatic.atlas.atlas_size &&
+                fixed.atlas.rgba == automatic.atlas.rgba,
+                "a full atlas must retain the exact maximum-size bitmap, even for non-power-of-two bounds");
+            if (policy != msdf::Missing_glyph_policy::FAIL_BUILD) {
+                ok &= check(automatic.atlas_full, "test coverage must overflow the maximum atlas");
+            }
+        }
+    }
+    return ok;
+}
+
+bool test_auto_atlas_with_advance_only_glyphs()
+{
+    const auto font_data = read_test_font();
+    const std::vector<char32_t> codepoints = {U' '};
+    msdf::options_t options = atlas_options(2048);
+    options.auto_atlas_size = true;
+    const auto result = msdf::build_font_atlas(
+        font_data.data(), font_data.size(), k_default_draw_pixel_height, codepoints, options);
+    return check(result.status == msdf::Build_status::SUCCESS &&
+        result.atlas.glyphs.count(U' ') == 1 &&
+        result.atlas.atlas_size == 1 && result.atlas.rgba.size() == 4,
+        "advance-only glyphs must keep their metrics without a large empty texture");
+}
+
 // A hand-built atlas whose ascender equals the draw pixel height and whose baked
 // distance range is zero, so draw_scale == 1 and the symmetric plane padding is
 // zero. Font-unit geometry then maps 1:1 to output pixels, which keeps the layout
@@ -791,6 +932,9 @@ int main()
     ok &= run_test("replacement missing glyph policy", test_replacement_missing_glyph_policy);
     ok &= run_test("fail missing glyph policy", test_fail_missing_glyph_policy);
     ok &= run_test("atlas generation smoke", test_atlas_generation_smoke);
+    ok &= run_test("automatic atlas preserves glyphs", test_auto_atlas_preserves_glyphs);
+    ok &= run_test("automatic atlas preserves maximum diagnostics", test_auto_atlas_preserves_maximum_diagnostics);
+    ok &= run_test("automatic atlas with advance-only glyphs", test_auto_atlas_with_advance_only_glyphs);
     ok &= run_test("whitespace skips degenerate quads", test_whitespace_skips_degenerate_quads);
     ok &= run_test("two heights share baked bitmap", test_two_heights_share_baked_bitmap);
     ok &= run_test("scaled geometry is linear in draw height", test_scaled_geometry_is_linear_in_draw_height);
