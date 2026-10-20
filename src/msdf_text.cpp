@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -248,6 +249,57 @@ struct Glyph_job
     int bitmap_h = 0;
 };
 
+struct Glyph_packer
+{
+    std::int64_t pen_x = 0;
+    std::int64_t pen_y = 0;
+    std::int64_t row_h = 0;
+
+    bool place(const Glyph_job& job, int atlas_size, int gutter, int& x, int& y)
+    {
+        if (job.bitmap_w > atlas_size || job.bitmap_h > atlas_size) {
+            return false;
+        }
+        if (pen_x > atlas_size - job.bitmap_w) {
+            pen_x = 0;
+            pen_y += row_h + gutter;
+            row_h = 0;
+        }
+        if (pen_y > atlas_size - job.bitmap_h) {
+            return false;
+        }
+        x = static_cast<int>(pen_x);
+        y = static_cast<int>(pen_y);
+        row_h = std::max(row_h, static_cast<std::int64_t>(job.bitmap_h));
+        pen_x += static_cast<std::int64_t>(job.bitmap_w) + gutter;
+        return true;
+    }
+};
+
+int fitting_atlas_size(const std::vector<Glyph_job>& jobs, int maximum, int gutter)
+{
+    for (int size = 1; size < maximum;) {
+        Glyph_packer packer;
+        int x = 0;
+        int y = 0;
+        bool fits = true;
+        for (const Glyph_job& job : jobs) {
+            if (!packer.place(job, size, gutter, x, y)) {
+                fits = false;
+                break;
+            }
+        }
+        if (fits) {
+            return size;
+        }
+        if (size > maximum / 2) {
+            break;
+        }
+        size *= 2;
+    }
+    return maximum;
+}
+
 struct Emitted_glyph
 {
     char32_t codepoint = 0;
@@ -452,15 +504,14 @@ build_result_t build_font_atlas(
         return result;
     }
 
-    const std::size_t atlas_size = static_cast<std::size_t>(options.atlas_size);
-    if (atlas_size > std::numeric_limits<std::size_t>::max() / atlas_size) {
+    const std::size_t maximum_atlas_size = static_cast<std::size_t>(options.atlas_size);
+    if (maximum_atlas_size > std::numeric_limits<std::size_t>::max() / maximum_atlas_size) {
         return failure("MSDF atlas pixel count overflows size_t");
     }
-    const std::size_t atlas_pixel_count = atlas_size * atlas_size;
+    const std::size_t atlas_pixel_count = maximum_atlas_size * maximum_atlas_size;
     if (atlas_pixel_count > std::numeric_limits<std::size_t>::max() / 4u) {
         return failure("MSDF atlas byte size overflows size_t");
     }
-    const std::size_t atlas_byte_count = atlas_pixel_count * 4u;
 
     freetype_ptr ft(msdfgen::initializeFreetype());
     if (!ft) {
@@ -570,19 +621,6 @@ build_result_t build_font_atlas(
     atlas.font_metrics_units.line_height = static_cast<float>(metrics.lineHeight);
     atlas.font_metrics_units.em_size = static_cast<float>(metrics.emSize);
 
-    if (atlas_byte_count > atlas.rgba.max_size()) {
-        return fail_with_diagnostics("MSDF atlas storage exceeds vector capacity");
-    }
-    try {
-        atlas.rgba.assign(atlas_byte_count, 0);
-    }
-    catch (const std::bad_alloc&) {
-        return fail_with_diagnostics("Failed to allocate MSDF atlas storage");
-    }
-
-    int pen_x = 0;
-    int pen_y = 0;
-    int row_h = 0;
     const int atlas_gutter_px = options.atlas_gutter_px;
     std::vector<Emitted_glyph> emitted_glyphs;
     emitted_glyphs.reserve(requested_codepoints.size());
@@ -685,17 +723,31 @@ build_result_t build_font_atlas(
             return left_codepoint < right_codepoint;
         });
 
+    if (options.auto_atlas_size) {
+        atlas.atlas_size = fitting_atlas_size(
+            visible_jobs, options.atlas_size, atlas_gutter_px);
+    }
+    const std::size_t atlas_size = static_cast<std::size_t>(atlas.atlas_size);
+    const std::size_t atlas_byte_count = atlas_size * atlas_size * 4u;
+    if (atlas_byte_count > atlas.rgba.max_size()) {
+        return fail_with_diagnostics("MSDF atlas storage exceeds vector capacity");
+    }
+    try {
+        atlas.rgba.assign(atlas_byte_count, 0);
+    }
+    catch (const std::bad_alloc&) {
+        return fail_with_diagnostics("Failed to allocate MSDF atlas storage");
+    }
+
+    Glyph_packer packer;
     for (std::size_t i = 0; i < visible_jobs.size(); ++i) {
         const Glyph_job& job = visible_jobs[i];
         const double width_em = job.bounds.r - job.bounds.l;
         const double height_em = job.bounds.t - job.bounds.b;
 
-        if (pen_x > options.atlas_size - job.bitmap_w) {
-            pen_x = 0;
-            pen_y += row_h + atlas_gutter_px;
-            row_h = 0;
-        }
-        if (pen_y > options.atlas_size - job.bitmap_h) {
+        int pen_x = 0;
+        int pen_y = 0;
+        if (!packer.place(job, atlas.atlas_size, atlas_gutter_px, pen_x, pen_y)) {
             result.atlas_full = true;
             for (std::size_t j = i; j < visible_jobs.size(); ++j) {
                 append_codepoints(result.skipped_no_space, visible_jobs[j].codepoints);
@@ -750,10 +802,10 @@ build_result_t build_font_atlas(
         const double uv_width = width_em * bitmap_scale + 2.0 * atlas_px_range;
         const double uv_height = height_em * bitmap_scale + 2.0 * atlas_px_range;
 
-        glyph.uv_left   = static_cast<float>(pen_x)            / options.atlas_size;
-        glyph.uv_right  = static_cast<float>(pen_x + uv_width) / options.atlas_size;
-        glyph.uv_top    = static_cast<float>(pen_y)             / options.atlas_size;
-        glyph.uv_bottom = static_cast<float>(pen_y + uv_height) / options.atlas_size;
+        glyph.uv_left   = static_cast<float>(pen_x)            / atlas.atlas_size;
+        glyph.uv_right  = static_cast<float>(pen_x + uv_width) / atlas.atlas_size;
+        glyph.uv_top    = static_cast<float>(pen_y)             / atlas.atlas_size;
+        glyph.uv_bottom = static_cast<float>(pen_y + uv_height) / atlas.atlas_size;
 
         for (char32_t codepoint : job.codepoints) {
             atlas.glyphs.emplace(codepoint, glyph);
@@ -763,9 +815,6 @@ build_result_t build_font_atlas(
                 atlas.zero_advance_available = glyph.advance_units > 0.0f;
             }
         }
-
-        row_h = std::max(row_h, job.bitmap_h);
-        pen_x += job.bitmap_w + atlas_gutter_px;
     }
 
     if (options.build_kerning_table) {

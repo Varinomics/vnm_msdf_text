@@ -186,6 +186,14 @@ struct options_t
      * atlas generation.
      */
     Missing_glyph_policy missing_glyph_policy = Missing_glyph_policy::SKIP;
+    /**
+     * @brief Use atlas_size as an upper bound instead of a fixed texture size.
+     *
+     * Selects the smallest power-of-two square that packs the glyph bitmaps
+     * without changing their scale. If none fits, uses atlas_size and retains
+     * the usual partial-build diagnostics, including for non-power-of-two bounds.
+     */
+    bool auto_atlas_size = false;
 };
 
 /**
