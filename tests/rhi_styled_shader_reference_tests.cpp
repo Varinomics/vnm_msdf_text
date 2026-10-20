@@ -244,33 +244,7 @@ std::string subpixel_step_statement()
         std::string(ref::k_lcd_vertical_step_glsl) + ");";
 }
 
-bool test_resolved_orders_match_the_shader_reference()
-{
-    struct case_t
-    {
-        lcd::Resolved_lcd_subpixel_order order;
-        int                              value;
-        float                            uniform;
-    };
-
-    constexpr case_t cases[] = {
-        { lcd::Resolved_lcd_subpixel_order::NONE, ref::k_lcd_order_none_value, ref::k_lcd_order_none_uniform },
-        { lcd::Resolved_lcd_subpixel_order::RGB,  ref::k_lcd_order_rgb_value,  ref::k_lcd_order_rgb_uniform  },
-        { lcd::Resolved_lcd_subpixel_order::BGR,  ref::k_lcd_order_bgr_value,  ref::k_lcd_order_bgr_uniform  },
-        { lcd::Resolved_lcd_subpixel_order::VRGB, ref::k_lcd_order_vrgb_value, ref::k_lcd_order_vrgb_uniform },
-        { lcd::Resolved_lcd_subpixel_order::VBGR, ref::k_lcd_order_vbgr_value, ref::k_lcd_order_vbgr_uniform },
-    };
-
-    bool ok = true;
-    for (const case_t& item : cases) {
-        ok &= check(lcd::resolved_order_value(item.order) == item.value,
-            "the resolved LCD order value must match the shader reference");
-        ok &= check(lcd::shader_uniform_value(item.order) == item.uniform,
-            "the LCD order uniform value must match the shader reference");
-    }
-    return ok;
-}
-
+// The shared enum/uniform mapping is covered by lcd_contract_tests.
 bool test_styled_shader_binds_the_reference_filter()
 {
     const std::string shader = read_text_file(VNM_MSDF_TEXT_STYLED_FRAG_PATH);
@@ -374,8 +348,6 @@ bool run_test(const char* name, bool (*test)())
 int main()
 {
     bool ok = true;
-    ok &= run_test("resolved orders match the shader reference",
-        test_resolved_orders_match_the_shader_reference);
     ok &= run_test("styled shader binds the reference filter",
         test_styled_shader_binds_the_reference_filter);
 
