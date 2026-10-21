@@ -2663,9 +2663,9 @@ bool test_null_prepare_styled_survives_uniform_staging_failure()
 
     mtr::text_result_t failed{};
     try {
-        // The copied per-frame blocks survive this one allocation; staging the
-        // byte buffer is the next allocation and must report OUT_OF_MEMORY.
-        Failing_allocation fail(1);
+        // The warm-up staged one draw. The two queued draws now need a larger
+        // staging buffer; fail its allocation before any buffer uploads.
+        Failing_allocation fail(0);
         failed = renderer.prepare(frame);
     }
     catch (const std::exception&) {
