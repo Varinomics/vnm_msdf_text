@@ -163,14 +163,17 @@ template <typename Block>
     std::size_t                stride,
     std::vector<std::uint8_t>& staging)
 {
-    // Keep the previous staging bytes until the complete replacement exists:
-    // prepare() may be retried after an allocation failure with the same queue.
+    // Byte-vector growth preserves the previous bytes on allocation failure,
+    // so prepare() can be retried with the same queue. Reuse retained capacity
+    // and clear the old bytes; resize() already zeroes any newly added bytes.
     try {
-        std::vector<std::uint8_t> staged(blocks.size() * stride, 0);
+        const std::size_t byte_count     = blocks.size() * stride;
+        const std::size_t retained_bytes = std::min(staging.size(), byte_count);
+        staging.resize(byte_count);
+        std::fill_n(staging.begin(), retained_bytes, std::uint8_t{0});
         for (std::size_t i = 0; i < blocks.size(); ++i) {
-            std::memcpy(staged.data() + i * stride, &blocks[i], sizeof(Block));
+            std::memcpy(staging.data() + i * stride, &blocks[i], sizeof(Block));
         }
-        staging.swap(staged);
     }
     catch (const std::bad_alloc&) {
         return detail::make_text_result(
@@ -858,35 +861,25 @@ struct Text_renderer::Impl
                 Text_status::GEOMETRY_LIMIT_EXCEEDED,
                 "prepared styled draw states exceed one QRhi uniform buffer");
         }
-        // target_height and framebuffer_y_up describe this frame, so retain the
-        // queued blocks unchanged and stage frame-local copies instead.
-        std::vector<styled_uniform_block_t> frame_uniforms;
-        try {
-            frame_uniforms = styled_uniforms;
-        }
-        catch (const std::bad_alloc&) {
-            return detail::make_text_result(
-                Text_status::OUT_OF_MEMORY,
-                "styled text uniform blocks could not be staged");
-        }
-        catch (const std::length_error&) {
-            return detail::make_text_result(
-                Text_status::OUT_OF_MEMORY,
-                "styled text uniform blocks could not be staged");
+        const text_result_t staged =
+            stage_uniform_blocks(styled_uniforms, stride, styled_uniform_staging);
+        if (staged.status != Text_status::OK) {
+            return staged;
         }
 
+        // These fields describe this frame. Patch the staged bytes directly
+        // so the queued blocks stay unchanged without another block vector.
         const auto target_height =
             static_cast<float>(std::max(1, frame.render_target->pixelSize().height()));
         const std::int32_t y_up = frame.rhi->isYUpInFramebuffer() ? 1 : 0;
-        for (styled_uniform_block_t& block : frame_uniforms) {
-            block.target_height    = target_height;
-            block.framebuffer_y_up = y_up;
-        }
-
-        const text_result_t staged =
-            stage_uniform_blocks(frame_uniforms, stride, styled_uniform_staging);
-        if (staged.status != Text_status::OK) {
-            return staged;
+        for (std::size_t i = 0; i < styled_uniforms.size(); ++i) {
+            std::uint8_t* block = styled_uniform_staging.data() + i * stride;
+            std::memcpy(
+                block + offsetof(styled_uniform_block_t, target_height),
+                &target_height, sizeof(target_height));
+            std::memcpy(
+                block + offsetof(styled_uniform_block_t, framebuffer_y_up),
+                &y_up, sizeof(y_up));
         }
         out_stride = stride;
 
