@@ -16,19 +16,9 @@ else()
   set(VNM_MSDF_TEXT_IS_TOP_LEVEL OFF)
 endif()
 
-set(_vnm_msdf_text_fetch_deps_default ${VNM_MSDF_TEXT_IS_TOP_LEVEL})
-if(DEFINED VNM_MSDF_TEXT_USE_SYSTEM_LIBS AND
-   NOT DEFINED VNM_MSDF_TEXT_FETCH_DEPS)
-  if(VNM_MSDF_TEXT_USE_SYSTEM_LIBS)
-    set(_vnm_msdf_text_fetch_deps_default OFF)
-  else()
-    set(_vnm_msdf_text_fetch_deps_default ON)
-  endif()
-endif()
-
 option(VNM_MSDF_TEXT_FETCH_DEPS
   "Fetch/build FreeType and msdfgen when they are not already available"
-  ${_vnm_msdf_text_fetch_deps_default})
+  ${VNM_MSDF_TEXT_IS_TOP_LEVEL})
 option(VNM_MSDF_TEXT_BUILD_TESTS
   "Build vnm_msdf_text tests"
   ${VNM_MSDF_TEXT_IS_TOP_LEVEL})
@@ -89,13 +79,6 @@ target_link_libraries(vnm_msdf_text_lcd_shader_reference
 
 set(_vnm_msdf_text_export_ok FALSE)
 if(VNM_MSDF_TEXT_BUILD_ATLAS)
-if(DEFINED VNM_MSDF_TEXT_USE_SYSTEM_LIBS)
-  message(STATUS
-    "VNM_MSDF_TEXT_USE_SYSTEM_LIBS is deprecated. Use "
-    "VNM_MSDF_TEXT_FETCH_DEPS=OFF to require existing/find_package "
-    "dependencies, or VNM_MSDF_TEXT_FETCH_DEPS=ON to allow FetchContent.")
-endif()
-
 # Baking one glyph inventory is a per-pixel scan of every glyph contour, and an
 # unoptimized msdfgen runs it about an order of magnitude slower than an
 # optimized one. The bake is synchronous for its caller, so that difference is
