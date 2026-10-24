@@ -297,14 +297,9 @@ bool render_offscreen(
         readback.pixelSize.width(),
         readback.pixelSize.height(),
         QImage::Format_RGBA8888);
-    // One operation, two spellings across a Qt generation: flipped() arrived in
-    // Qt 6.9 and deprecates mirrored(), and this project supports Qt 6.7 up.
+    // Pixel checks use top-down image rows on every backend.
     if (rhi.isYUpInFramebuffer()) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
         out_image = image.flipped(Qt::Vertical);
-#else
-        out_image = image.mirrored(false, true);
-#endif
     }
     else {
         out_image = image.copy();
