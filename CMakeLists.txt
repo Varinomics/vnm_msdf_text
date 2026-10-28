@@ -35,6 +35,15 @@ option(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN
 
 include(FetchContent)
 
+function(vnm_msdf_text_make_native_dependency_available name)
+  # A Qt consumer may enable autogen before adding this library. Its native
+  # font dependencies must not inherit those per-target generation steps.
+  set(CMAKE_AUTOMOC OFF)
+  set(CMAKE_AUTOUIC OFF)
+  set(CMAKE_AUTORCC OFF)
+  FetchContent_MakeAvailable(${name})
+endfunction()
+
 if(VNM_MSDF_TEXT_BUILD_RHI AND NOT VNM_MSDF_TEXT_BUILD_ATLAS)
   message(FATAL_ERROR "The RHI text component requires VNM_MSDF_TEXT_BUILD_ATLAS=ON")
 endif()
@@ -198,7 +207,7 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   set(FT_DISABLE_ZLIB ON CACHE BOOL "")
   set(FT_ENABLE_ERROR_STRINGS OFF CACHE BOOL "")
 
-  FetchContent_MakeAvailable(freetype)
+  vnm_msdf_text_make_native_dependency_available(freetype)
   vnm_msdf_text_alias_freetype_target()
 
   if(NOT TARGET Freetype::Freetype)
@@ -253,7 +262,7 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   if(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN)
     vnm_msdf_text_begin_optimized_dependency_scope()
   endif()
-  FetchContent_MakeAvailable(msdfgen)
+  vnm_msdf_text_make_native_dependency_available(msdfgen)
   if(VNM_MSDF_TEXT_OPTIMIZE_MSDFGEN)
     vnm_msdf_text_end_optimized_dependency_scope()
   endif()
