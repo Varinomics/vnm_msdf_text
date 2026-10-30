@@ -1,7 +1,6 @@
 # vnm_msdf_text Follow-Ups
 
-This document tracks valid review items that are broader than the current
-correctness and small API cleanup batches.
+These follow-ups depend on the caller needs and scope conditions stated below.
 
 ## Architecture
 
@@ -35,9 +34,10 @@ correctness and small API cleanup batches.
 
 ## Rendering Contract
 
-- Add a visual/golden test for the atlas range and coordinate contract. The
-  downstream terminal-surface tests exercise this path today, but a local
-  renderer-independent fixture would make regressions easier to isolate.
+- Add a renderer-independent visual fixture for the atlas range and coordinate
+  contract. The local QRhi backend tests check filled glyph coverage against
+  measured bounds, and downstream terminal-surface tests exercise rendering;
+  an independent fixture would isolate the atlas contract from those renderers.
 - Document or support derivative-based screen pixel range calculation if
   callers scale generated quads after layout.
 
