@@ -245,7 +245,7 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   vnm_msdf_text_set_fetchcontent_build_dir(msdfgen msdfgen)
   FetchContent_Declare(msdfgen
     GIT_REPOSITORY https://github.com/Chlumsky/msdfgen.git
-    GIT_TAG v1.13
+    GIT_TAG v1.13.1
     GIT_SHALLOW TRUE
     BINARY_DIR "${FETCHCONTENT_BINARY_DIR_msdfgen}"
   )
