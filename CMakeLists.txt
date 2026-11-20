@@ -195,7 +195,7 @@ elseif(VNM_MSDF_TEXT_FETCH_DEPS)
   vnm_msdf_text_set_fetchcontent_build_dir(freetype freetype)
   FetchContent_Declare(freetype
     GIT_REPOSITORY https://gitlab.freedesktop.org/freetype/freetype.git
-    GIT_TAG VER-2-14-3
+    GIT_TAG VER-2-15-0
     GIT_SHALLOW TRUE
     BINARY_DIR "${FETCHCONTENT_BINARY_DIR_freetype}"
   )
