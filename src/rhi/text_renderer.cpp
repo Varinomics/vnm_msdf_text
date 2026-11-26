@@ -66,7 +66,8 @@ struct styled_uniform_block_t
     float lcd_subpixel_order;
     std::int32_t framebuffer_y_up;
     std::int32_t sdf_mask_enabled;
-    float padding[2];
+    float glow_px_range;
+    float padding;
 };
 
 static_assert(offsetof(styled_uniform_block_t, color)              ==  64, "styled UBO colour offset");
@@ -75,6 +76,7 @@ static_assert(offsetof(styled_uniform_block_t, background_color)   ==  96, "styl
 static_assert(offsetof(styled_uniform_block_t, px_range)           == 112, "styled UBO px range offset");
 static_assert(offsetof(styled_uniform_block_t, framebuffer_y_up)   == 128, "styled UBO y-up offset");
 static_assert(offsetof(styled_uniform_block_t, sdf_mask_enabled)   == 132, "styled UBO mask offset");
+static_assert(offsetof(styled_uniform_block_t, glow_px_range)      == 136, "styled UBO glow range offset");
 static_assert(sizeof(styled_uniform_block_t) == 144, "styled uniform block must match the shader's std140 layout");
 
 /**
@@ -1020,8 +1022,11 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
 
     const std::span<const text_vertex_t> batch_vertices = batch.vertices();
     const std::span<const std::uint32_t> batch_indices  = batch.indices();
-    const float px_range =
+    const float distance_px_range =
         px_range_for_pixel_height(snapshot->atlas(), snapshot->draw_pixel_height());
+    // The normalized field saturates at both ends. A coverage ramp wider
+    // than its encoded range would paint even a completely empty texel.
+    const float coverage_px_range = std::max(distance_px_range, 1.0f);
 
     const bool        styled      = is_styled(state);
     const std::size_t base_vertex = styled ? d->styled_vertices.size() : d->vertices.size();
@@ -1093,7 +1098,7 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
         uniform_block_t block{};
         std::memcpy(block.transform, state.transform.data(), sizeof(block.transform));
         std::memcpy(block.color, state.color.data(), sizeof(block.color));
-        block.px_range = px_range;
+        block.px_range = coverage_px_range;
 
         d->vertices.insert(d->vertices.end(), batch_vertices.begin(), batch_vertices.end());
         for (std::uint32_t index : batch_indices) {
@@ -1133,7 +1138,8 @@ text_result_t Text_renderer::queue(const Text_batch& batch, const draw_state_t& 
     styled_uniform_block_t block{};
     std::memcpy(block.transform, state.transform.data(), sizeof(block.transform));
     std::memcpy(block.color, state.color.data(), sizeof(block.color));
-    block.px_range           = px_range;
+    block.px_range           = coverage_px_range;
+    block.glow_px_range      = distance_px_range;
     block.sdf_mask_enabled   = state.sdf_mask ? 1 : 0;
     block.lcd_subpixel_order = state.lcd
         ? lcd::shader_uniform_value(state.lcd->order)

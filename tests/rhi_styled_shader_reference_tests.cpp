@@ -327,7 +327,7 @@ bool test_styled_shader_binds_the_reference_filter()
             "}"),
         "true-SDF masking must decode alpha for every MTSDF texel");
     ok &= check(
-        contains_statement(tokens, "return (texel.a - 0.5) * u.px_range;"),
+        contains_statement(tokens, "return (texel.a - 0.5) * u.glow_px_range;"),
         "glow distance must always come from the MTSDF alpha channel");
     ok &= check(
         !contains_statement(tokens, "texel.a > 0.0"),

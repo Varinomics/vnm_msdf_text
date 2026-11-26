@@ -17,7 +17,7 @@ layout(std140, binding = 0) uniform Block
     float lcd_subpixel_order;
     int   framebuffer_y_up;
     int   sdf_mask_enabled;
-    float padding_0;
+    float glow_px_range;
     float padding_1;
 } u;
 

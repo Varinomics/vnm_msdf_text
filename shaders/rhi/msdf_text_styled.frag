@@ -25,7 +25,7 @@ layout(std140, binding = 0) uniform Block
     float lcd_subpixel_order;
     int   framebuffer_y_up;
     int   sdf_mask_enabled;
-    float padding_0;
+    float glow_px_range;
     float padding_1;
 } u;
 
@@ -67,7 +67,7 @@ float signed_distance_from_texel(vec4 texel)
 {
     // The MTSDF atlas always stores the true signed distance in alpha. The glow
     // follows that field rather than the corner reconstruction in RGB.
-    return (texel.a - 0.5) * u.px_range;
+    return (texel.a - 0.5) * u.glow_px_range;
 }
 
 float glow_alpha_from_texel(vec4 texel)
