@@ -1,0 +1,52 @@
+name: Set up MSVC 14.51 x64
+description: Ensure the hosted Visual Studio 2026 installation supplies the pinned x64 compiler.
+runs:
+  using: composite
+  steps:
+    - name: Ensure the MSVC 14.51 component is installed
+      id: provision
+      shell: pwsh
+      run: |
+        $installerDirectory = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+        $vswhere = Join-Path $installerDirectory 'vswhere.exe'
+        $installation = & $vswhere -latest -products '*' -version '[18.0,19.0)' `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($LASTEXITCODE -ne 0 -or !$installation) {
+            throw 'A complete Visual Studio 2026 C++ installation is required.'
+        }
+        "installation=$installation" >> $env:GITHUB_OUTPUT
+        $compiler = Join-Path $installation 'VC\Tools\MSVC\14.51.*\bin\Hostx64\x64\cl.exe'
+        if (Test-Path -Path $compiler -PathType Leaf) {
+            return
+        }
+        if ($env:RUNNER_ENVIRONMENT -cne 'github-hosted') {
+            throw 'Automatic MSVC provisioning requires a GitHub-hosted runner.'
+        }
+        $arguments = @('modify', '--installPath', ('"{0}"' -f $installation),
+            '--channelId', 'VisualStudio.18.Release', '--quiet', '--norestart',
+            '--add', 'Microsoft.VisualStudio.Component.VC.14.51.x86.x64')
+        $setup = Start-Process -FilePath (Join-Path $installerDirectory 'setup.exe') `
+            -ArgumentList $arguments -WorkingDirectory $env:RUNNER_TEMP -WindowStyle Hidden -Wait -PassThru
+        if ($setup.ExitCode -notin 0, 3010) {
+            throw "MSVC 14.51 installation failed with exit code $($setup.ExitCode)."
+        }
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+        toolset: '14.51'
+
+    - name: Verify the active x64 compiler
+      shell: pwsh
+      env:
+        VS2026_ROOT: ${{ steps.provision.outputs.installation }}
+      run: |
+        if ($env:VisualStudioVersion -ne '18.0' -or $env:VCToolsVersion -notlike '14.51.*') {
+            throw 'Visual Studio 2026 with MSVC 14.51 is required.'
+        }
+        $expected = Get-Item -LiteralPath (Join-Path $env:VS2026_ROOT "VC\Tools\MSVC\$env:VCToolsVersion\bin\Hostx64\x64\cl.exe")
+        $actual = (Get-Command cl.exe -CommandType Application | Select-Object -First 1).Source
+        if ($actual -ine $expected.FullName) {
+            throw "Expected $($expected.FullName), found $actual."
+        }
+        Write-Host "Using $actual"
